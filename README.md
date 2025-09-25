@@ -42,7 +42,8 @@ cd kitsune
 
 2. **Install dependencies**:
 ```bash
-Run `poetry install,` assuming you already have Poetry installed. If you prefer pip, can also install via `pip install -r requirements.txt`
+Run `poetry install`, assuming you already have Poetry installed.
+If you prefer pip, can also install via `pip install -r requirements.txt`
 ```
 
 3. **Configure environment variables**:
