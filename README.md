@@ -22,7 +22,9 @@ kitsune/
 ├── llm_factory.py    # LLM provider factory
 ├── utils.py          # Utility functions
 ├── prompts.py        # Prompt templates
-├── requirements.txt  # Python dependencies
+├── pyproject.toml    # Python dependencies (for poetry)
+├── poetry.lock       # Poetry lock file
+├── requirements.txt  # Python dependencies (for pip)
 ├── .env.copy         # Environment variables (copy)
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
@@ -40,7 +42,7 @@ cd kitsune
 
 2. **Install dependencies**:
 ```bash
-Run `poetry install,` assuming you already have Poetry installed.
+Run `poetry install,` assuming you already have Poetry installed. If you prefer pip, can also install via `pip install -r requirements.txt`
 ```
 
 3. **Configure environment variables**:
