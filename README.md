@@ -1,6 +1,6 @@
-# Threat Detection Agent
+# Kitsune
 
-An intelligent agent that automatically generates detection rules from threat intelligence reports using multiple LLM providers.
+Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically generates detection rules from threat intelligence reports using multiple LLM providers.
 
 ## Features
 
@@ -14,7 +14,7 @@ An intelligent agent that automatically generates detection rules from threat in
 ## Project Structure
 
 ```
-threat-detection-agent/
+kitsune/
 ├── main.py           # Main entry point
 ├── agent.py          # Core ThreatDetectionAgent class
 ├── models.py         # Pydantic data models
@@ -23,8 +23,8 @@ threat-detection-agent/
 ├── utils.py          # Utility functions
 ├── prompts.py        # Prompt templates
 ├── requirements.txt  # Python dependencies
-├── .env             # Environment variables (create from .env.example)
-└── output1/         # Generated detection rules (created automatically)
+├── .env.copy         # Environment variables (copy)
+└── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
     ├── openai/
     └── perplexity/
@@ -35,17 +35,17 @@ threat-detection-agent/
 1. **Clone the repository**:
 ```bash
 git clone <repository-url>
-cd threat-detection-agent
+cd kitsune
 ```
 
 2. **Install dependencies**:
 ```bash
-pip install -r requirements.txt
+Run `poetry install,` assuming you already have Poetry installed.
 ```
 
 3. **Configure environment variables**:
 ```bash
-cp .env.example .env
+cp .env.copy .env
 # Edit .env with your API keys
 ```
 
@@ -64,10 +64,10 @@ cp .env.example .env
 
 ```bash
 LLM_PROVIDERS=anthropic,openai
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
 INTEL_URL=https://example.com/threat-report
-RULE_FORMAT=both
+RULE_FORMAT=spl
 ```
 
 ## Usage
@@ -123,7 +123,7 @@ agent = ThreatDetectionAgent(
 Generated rules are saved as text files in the output directory:
 
 ```
-output1/
+output/
 ├── anthropic/
 │   ├── UNC6395_Data_Exfiltration_Detection.txt
 │   └── UNC6395_Credential_Harvesting_Detection.txt
