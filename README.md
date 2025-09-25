@@ -42,9 +42,9 @@ cd kitsune
 
 2. **Install dependencies**:
 ```bash
-Run `poetry install`, assuming you already have Poetry installed.
-If you prefer pip, can also install via `pip install -r requirements.txt`
+poetry install
 ```
+If you prefer pip: `pip install -r requirements.txt`
 
 3. **Configure environment variables**:
 ```bash
@@ -73,6 +73,78 @@ INTEL_URL=https://example.com/threat-report
 RULE_FORMAT=spl
 ```
 
+## Quick Start
+
+### Basic Setup
+
+1. Unzip repo
+2. Run `poetry env activate`
+3. Copy last line from above command, something like `source '/home/USER/Documents/Github/kitsune/.venv/bin/activate'`
+4. Run `poetry install --no-root`
+5. Run `python main.py`
+
+<details>
+<summary>Expected Output</summary>
+
+Upon running `main.py`, you should see this output upon successful run (takes a min):
+
+```
+============================================================
+THREAT DETECTION AGENT
+============================================================
+Using providers: anthropic, openai, perplexity
+Processing URL: https://cloud.google.com/blog/topics/threat-intelligence/data-theft-salesforce-instances-via-salesloft-drift
+Rule formats: spl
+============================================================
+Generating rules with provider: ANTHROPIC
+============================================================
+[ANTHROPIC] Generating SPL rules...
+Fetched 10606 characters from URL
+Extracted threat intel for: UNC6395
+Generated 6 SPL rules
+[ANTHROPIC] Wrote 6 SPL rule file(s) to output/anthropic:
+  - UNC6395_OAuth_Token_Abuse_Salesforce_Detection.txt
+  - UNC6395_Bulk_Data_Export_Salesforce_Detection.txt
+  - UNC6395_Credential_Harvesting_Search_Detection.txt
+  - UNC6395_Abnormal_API_Access_Pattern_Detection.txt
+  - UNC6395_Cross_Platform_Token_Reuse_Detection.txt
+  - UNC6395_Third_Party_App_Privilege_Escalation_Detection.txt
+============================================================
+Generating rules with provider: OPENAI
+============================================================
+[OPENAI] Generating SPL rules...
+Fetched 10606 characters from URL
+Extracted threat intel for: UNC6395
+Generated 6 SPL rules
+[OPENAI] Wrote 6 SPL rule file(s) to output/openai:
+  - UNC6395_Data_Exfiltration_Salesforce_Detection.txt
+  - UNC6395_OAuth_Token_Abuse_Salesforce_Detection.txt
+  - UNC6395_Credential_Access_Cloud_Detection.txt
+  - UNC6395_Sensitive_Data_Search_Salesforce_Detection.txt
+  - UNC6395_Anomalous_User_Activity_Salesforce_Detection.txt
+  - UNC6395_Excessive_API_Calls_Salesforce_Detection.txt
+============================================================
+Generating rules with provider: PERPLEXITY
+============================================================
+[PERPLEXITY] Generating SPL rules...
+Fetched 10606 characters from URL
+Extracted threat intel for: UNC6395
+Generated 6 SPL rules
+[PERPLEXITY] Wrote 6 SPL rule file(s) to output/perplexity:
+  - UNC6395_Abnormal_Bulk_Export_Salesforce_Detection.txt
+  - UNC6395_New_OAuth_Application_Salesforce_Detection.txt
+  - UNC6395_Deleted_Job_Logs_Salesforce_Detection.txt
+  - UNC6395_Tor_Cloud_Proxy_Access_Salesforce_Detection.txt
+  - UNC6395_Secrets_Search_Exfiltrated_Data_Detection.txt
+  - UNC6395_Anomalous_SOQL_Usage_Salesforce_Detection.txt
+============================================================
+RULE GENERATION COMPLETE!
+============================================================
+Output directory: output/
+Check each provider subdirectory for generated rules.
+```
+</details>
+
 ## Usage
 
 ### Basic Usage
@@ -85,7 +157,7 @@ This will:
 1. Process the URL specified in `INTEL_URL`
 2. Use all providers listed in `LLM_PROVIDERS`
 3. Generate rules in the format specified by `RULE_FORMAT`
-4. Save outputs to `output1/<provider>/`
+4. Save outputs to `output/<provider>/`
 
 ### Programmatic Usage
 
@@ -198,21 +270,3 @@ CUSTOM_PROMPT = """Your custom prompt template here...
 3. **Rate Limiting**:
    - Adjust retry delays in `config.Settings`
    - Use fewer providers simultaneously
-
-## License
-
-[Your License Here]
-
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## Support
-
-For issues or questions, please create an issue in the repository.
