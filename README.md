@@ -5,11 +5,8 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 ## Features
 
 - **Multi-LLM Support**: Works with Anthropic Claude, OpenAI GPT, and Perplexity models
-- **Multiple Rule Formats**: Generates both Splunk SPL and Sigma detection rules
-- **Robust JSON Handling**: Special handling for Anthropic's response format with automatic fixing
-- **Intelligent Extraction**: Extracts threat actors, IOCs, MITRE TTPs, and behaviors from reports
-- **Author Attribution**: Automatically attributes rules based on the source
-- **Error Recovery**: Fallback mechanisms ensure you always get usable output
+- **Multiple Rule Formats**: Generates Splunk SPL or Sigma detection rules (or both)
+- **Artifact Extraction**: Extracts threat actors, IOCs, MITRE TTPs, and behaviors from reports
 
 ## Project Structure
 
@@ -24,8 +21,7 @@ kitsune/
 ├── prompts.py        # Prompt templates
 ├── pyproject.toml    # Python dependencies (for poetry)
 ├── poetry.lock       # Poetry lock file
-├── requirements.txt  # Python dependencies (for pip)
-├── .env.copy         # Environment variables (copy)
+├── .env              # Environment variables
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
     ├── openai/
@@ -42,14 +38,16 @@ cd kitsune
 
 2. **Install dependencies**:
 ```bash
-poetry install
+poetry install --no-root
+poetry env activate
+source ~/.venv/bin/activate
 ```
-If you prefer pip: `pip install -r requirements.txt`
 
 3. **Configure environment variables**:
 ```bash
 cp .env.copy .env
 # Edit .env with your API keys
+source .env
 ```
 
 ## Configuration
@@ -79,7 +77,7 @@ RULE_FORMAT=spl
 
 1. Unzip repo
 2. Run `poetry env activate`
-3. Copy last line from above command, something like `source '/home/USER/Documents/Github/kitsune/.venv/bin/activate'`
+3. Copy last line's output from above, something like `source '~/.venv/bin/activate'`
 4. Run `poetry install --no-root`
 5. Run `python main.py`
 
