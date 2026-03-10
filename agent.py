@@ -18,8 +18,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from models import (
-    ThreatIntelligence, DetectionRule, AgentState, 
-    RuleOutput, RulesBundle
+    ThreatIntelligence, DetectionRule, AgentState,
+    RuleOutput, RulesBundle, CoverageGap
 )
 from config import Settings
 from llm_factory import LLMFactory
@@ -33,6 +33,8 @@ from prompts import (
     SIGMA_GENERATION_PROMPT,
     JSON_FORMAT_INSTRUCTIONS_ANTHROPIC
 )
+from ioc_parser import validate_and_enrich_iocs, validate_ttps
+from coverage import analyze_gaps
 
 
 class ThreatDetectionAgent:
@@ -139,19 +141,21 @@ class ThreatDetectionAgent:
         workflow.add_node("extract_threat_intel", self._extract_threat_intel)
         workflow.add_node("generate_sigma_rules", self._generate_sigma_rules)
         workflow.add_node("generate_spl_rules", self._generate_spl_rules)
+        workflow.add_node("analyze_coverage", self._analyze_coverage)
         workflow.set_entry_point("fetch_content")
         workflow.add_edge("fetch_content", "extract_threat_intel")
         workflow.add_conditional_edges(
             "extract_threat_intel",
             self._route_to_rule_generator,
             {
-                "sigma": "generate_sigma_rules", 
+                "sigma": "generate_sigma_rules",
                 "spl": "generate_spl_rules",
-                "end": END  # Add this route for when threat_intel is None
+                "end": END,
             },
         )
-        workflow.add_edge("generate_sigma_rules", END)
-        workflow.add_edge("generate_spl_rules", END)
+        workflow.add_edge("generate_sigma_rules", "analyze_coverage")
+        workflow.add_edge("generate_spl_rules", "analyze_coverage")
+        workflow.add_edge("analyze_coverage", END)
         return workflow
 
     def _fetch_content(self, state: AgentState) -> AgentState:
@@ -187,24 +191,34 @@ class ThreatDetectionAgent:
 
         try:
             raw_intel = self._get_valid_json_response(
-                extraction_prompt, 
+                extraction_prompt,
                 expected_keys=["threat_actor", "iocs", "attack_description", "targeted_systems", "key_behaviors"]
             )
-            
+
             # Ensure all required fields are present with defaults
             raw_intel.setdefault("threat_actor", None)
             raw_intel.setdefault("campaign_name", None)
-            raw_intel.setdefault("mitre_ttps", [])
-            raw_intel.setdefault("iocs", {
-                "ips": [], "domains": [], "hashes": [], "files": [], "urls": []
-            })
             raw_intel.setdefault("attack_description", "Unknown attack methodology")
             raw_intel.setdefault("targeted_systems", [])
             raw_intel.setdefault("key_behaviors", [])
-            
+
+            # Validate, normalise, and regex-enrich IOCs
+            raw_intel["iocs"] = validate_and_enrich_iocs(
+                raw_intel.get("iocs") or {},
+                raw_text=state["content"],
+            )
+
+            # Validate, deduplicate, and confidence-score TTPs
+            raw_ttps = raw_intel.pop("mitre_ttps", [])
+            techniques = validate_ttps(raw_ttps, raw_text=state["content"])
+            raw_intel["techniques"] = [t.model_dump() for t in techniques]
+
             threat_intel = ThreatIntelligence(**raw_intel)
             state["threat_intel"] = threat_intel
-            print(f"Extracted threat intel for: {threat_intel.threat_actor or 'Unknown Actor'}")
+            print(
+                f"Extracted threat intel for: {threat_intel.threat_actor or 'Unknown Actor'} "
+                f"({threat_intel.iocs.total_count()} IOCs, {len(threat_intel.techniques)} TTPs)"
+            )
 
         except Exception as e:
             print(f"Threat intel extraction failed: {str(e)}")
@@ -226,6 +240,7 @@ class ThreatDetectionAgent:
             "content": "",
             "threat_intel": None,
             "detection_rules": [],
+            "coverage_gaps": [],
             "rule_format": rule_format,
             "error": None,
         }
@@ -268,11 +283,11 @@ class ThreatDetectionAgent:
         prompt_content = SPL_GENERATION_PROMPT.format(
             threat_actor=intel.threat_actor or 'Unknown',
             campaign_name=intel.campaign_name or 'N/A',
-            mitre_ttps=', '.join(intel.mitre_ttps or []),
+            mitre_ttps=', '.join(f"{t.id}({t.tactic})" for t in intel.techniques),
             attack_description=intel.attack_description,
             key_behaviors=', '.join(intel.key_behaviors or []),
             targeted_systems=', '.join(intel.targeted_systems or []),
-            iocs=dict(intel.iocs) if intel.iocs else {},
+            iocs=intel.iocs.to_dict() if intel.iocs else {},
             json_format_section=(JSON_FORMAT_INSTRUCTIONS_ANTHROPIC if self.llm_provider == "anthropic" else "")
         )
 
@@ -317,11 +332,11 @@ class ThreatDetectionAgent:
         prompt_content = SIGMA_GENERATION_PROMPT.format(
             threat_actor=intel.threat_actor or 'Unknown',
             campaign_name=intel.campaign_name or 'N/A',
-            mitre_ttps=', '.join(intel.mitre_ttps or []),
+            mitre_ttps=', '.join(f"{t.id}({t.tactic})" for t in intel.techniques),
             attack_description=intel.attack_description,
             key_behaviors=', '.join(intel.key_behaviors or []),
             targeted_systems=', '.join(intel.targeted_systems or []),
-            iocs=dict(intel.iocs) if intel.iocs else {},
+            iocs=intel.iocs.to_dict() if intel.iocs else {},
             json_format_section=(JSON_FORMAT_INSTRUCTIONS_ANTHROPIC if self.llm_provider == "anthropic" else "")
         )
 
@@ -352,6 +367,20 @@ class ThreatDetectionAgent:
             state["error"] = f"Failed to generate Sigma rules: {str(e)}"
             state["detection_rules"] = []
 
+        return state
+
+    def _analyze_coverage(self, state: AgentState) -> AgentState:
+        """Identify MITRE techniques lacking a corresponding detection rule."""
+        techniques = getattr(state.get("threat_intel"), "techniques", []) or []
+        gaps = analyze_gaps(techniques, state.get("detection_rules", []))
+        state["coverage_gaps"] = gaps
+        if gaps:
+            print(f"\n[COVERAGE GAPS] {len(gaps)} uncovered technique(s):")
+            for g in gaps:
+                print(f"  [{g.priority.upper()}] {g.technique_id} ({g.tactic})")
+                print(f"    Data sources needed: {', '.join(g.data_sources[:2])}")
+        else:
+            print("[COVERAGE] All techniques have corresponding detection rules.")
         return state
 
     def _finalize_rules(

@@ -42,7 +42,7 @@ class AuthorMapping:
         "trendmicro.com": "Trend Micro Research",
         "kaspersky.com": "Kaspersky GReAT",
     }
-    
+
     DEFAULT_AUTHOR = "Security Research Team"
 
 
@@ -51,18 +51,18 @@ class Settings:
     # Text processing
     CHUNK_SIZE = 4000
     CHUNK_OVERLAP = 200
-    
+
     # File handling
     MAX_FILENAME_LENGTH = 120
     OUTPUT_DIR = "output"
-    
+
     # LLM settings
     DEFAULT_TEMPERATURE = 0
     MAX_RETRIES = 3
     RETRY_DELAY = 1.0
-    
+
     # JSON extraction
     JSON_EXTRACT_MAX_RETRIES = 3
-    
+
     # Content safety
     FORBIDDEN_TERMS = ["disable logging", "delete", "shutdown", "format disk"]

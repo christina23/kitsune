@@ -16,6 +16,8 @@ CRITICAL INSTRUCTIONS:
 - Extract EXACT names, codes, and identifiers from the source text - do not paraphrase or generalize
 - For threat actors, use the EXACT designation (e.g., "UNC6395", "APT29", "Lazarus Group")
 - For MITRE TTPs, extract the exact technique IDs mentioned (format: T####.###)
+- For MITRE TTPs: prefer sub-technique IDs (T####.###) over parent (T####) when the report provides enough specificity. E.g. prefer T1059.001 (PowerShell) over T1059.
+- Only include TTPs directly evidenced in the text — do not infer beyond what is stated.
 - For IOCs, extract specific values (IPs, domains, file hashes, file names)
 - For targeted systems, be specific (e.g., "Salesforce instances", "Office 365 tenants", not just "cloud services")
 - For key behaviors, describe specific TTPs and attack methods mentioned

@@ -2,10 +2,12 @@
 Data models and schemas for the Threat Detection Agent
 """
 
-from typing import Dict, List, Optional, Literal, TypedDict
+from typing import List, Optional, Literal, TypedDict
 from datetime import datetime
 from enum import Enum
 from pydantic import BaseModel, Field
+
+from ioc_parser import IOCCollection, Technique
 
 
 class LLMProvider(Enum):
@@ -15,12 +17,22 @@ class LLMProvider(Enum):
     PERPLEXITY = "perplexity"
 
 
+class CoverageGap(BaseModel):
+    """A MITRE technique with no corresponding detection rule."""
+    technique_id: str
+    tactic: str
+    priority: Literal["high", "medium", "low"]
+    reason: str
+    data_sources: List[str]
+    confidence: float
+
+
 class ThreatIntelligence(BaseModel):
     """Extracted threat intelligence data"""
     threat_actor: Optional[str]
     campaign_name: Optional[str]
-    mitre_ttps: List[str]
-    iocs: Dict[str, List[str]]
+    techniques: List[Technique] = []
+    iocs: IOCCollection
     attack_description: str
     targeted_systems: List[str]
     key_behaviors: List[str]
@@ -57,5 +69,6 @@ class AgentState(TypedDict):
     content: str
     threat_intel: Optional[ThreatIntelligence]
     detection_rules: List[DetectionRule]
+    coverage_gaps: List[CoverageGap]
     rule_format: Literal["sigma", "spl"]
     error: Optional[str]

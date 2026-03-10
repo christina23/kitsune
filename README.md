@@ -7,7 +7,9 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 - **Multi-LLM Support**: Works with Anthropic Claude, OpenAI GPT, and Perplexity models
 - **Multiple Rule Formats**: Generates both Splunk SPL and Sigma detection rules
 - **Robust JSON Handling**: Special handling for Anthropic's response format with automatic fixing
-- **Intelligent Extraction**: Extracts threat actors, IOCs, MITRE TTPs, and behaviors from reports
+- **Validated IOC Extraction**: Regex-based extraction and validation for IPs, domains, hashes, URLs, and file names — merges LLM output with regex findings and deduplicates
+- **Validated TTP Extraction**: MITRE ATT&CK technique IDs are validated against regex patterns, confidence-scored (1.0 if found verbatim in text, 0.85 if LLM-only, 0.7 if regex-only), and deduplicated; sub-techniques preferred over parent IDs
+- **Coverage Gap Analysis**: After rule generation, compares extracted techniques against the generated rules and reports which TTPs have no detection coverage, with priority (high/medium/low) and recommended data sources
 - **Author Attribution**: Automatically attributes rules based on the source
 - **Error Recovery**: Fallback mechanisms ensure you always get usable output
 
@@ -16,15 +18,16 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 ```
 kitsune/
 ├── main.py           # Main entry point
-├── agent.py          # Core ThreatDetectionAgent class
-├── models.py         # Pydantic data models
+├── agent.py          # Core ThreatDetectionAgent class (LangGraph workflow)
+├── models.py         # Pydantic data models (ThreatIntelligence, DetectionRule, CoverageGap, AgentState)
+├── ioc_parser.py     # Regex IOC + TTP extraction, validation, and confidence scoring
+├── coverage.py       # Coverage gap analysis (techniques vs generated rules)
 ├── config.py         # Configuration settings
 ├── llm_factory.py    # LLM provider factory
 ├── utils.py          # Utility functions
 ├── prompts.py        # Prompt templates
 ├── pyproject.toml    # Python dependencies (for poetry)
 ├── poetry.lock       # Poetry lock file
-├── requirements.txt  # Python dependencies (for pip)
 ├── .env.copy         # Environment variables (copy)
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
@@ -82,24 +85,54 @@ python main.py
 ```
 
 This will:
-1. Process the URL specified in `INTEL_URL`
-2. Use all providers listed in `LLM_PROVIDERS`
-3. Generate rules in the format specified by `RULE_FORMAT`
-4. Save outputs to `output1/<provider>/`
+1. Fetch the URL specified in `INTEL_URL`
+2. Extract threat intelligence (IOCs + MITRE TTPs) using the configured LLM(s)
+3. Validate and confidence-score IOCs and TTPs with regex
+4. Generate detection rules in the format specified by `RULE_FORMAT`
+5. Run coverage gap analysis and print any uncovered techniques to the console
+6. Save rule files to `output/<provider>/`
+
+### Override settings without editing `.env`
+
+```bash
+# Use a single provider and a specific URL
+LLM_PROVIDER=anthropic INTEL_URL=https://example.com/threat-report python main.py
+
+# Generate both SPL and Sigma rules
+RULE_FORMAT=both python main.py
+
+# Enable debug output on errors
+DEBUG=true python main.py
+```
+
+### Console output
+
+A successful run prints:
+
+```
+Fetched 12345 characters from URL
+Extracted threat intel for: APT29 (8 IOCs, 6 TTPs)
+Generated 5 SPL rules
+
+[COVERAGE GAPS] 2 uncovered technique(s):
+  [HIGH] T1059.001 (execution)
+    Data sources needed: Sysmon (EventID 1), PowerShell Script Block Logging
+  [MEDIUM] T1071.001 (command-and-control)
+    Data sources needed: Proxy Logs, Network Flow Logs
+```
+
+Techniques are considered covered if a generated rule references the exact sub-technique ID or its parent (e.g. a rule tagging `T1059` covers `T1059.001`).
 
 ### Programmatic Usage
 
 ```python
 from agent import ThreatDetectionAgent
 
-# Create agent with specific provider
 agent = ThreatDetectionAgent(llm_provider="anthropic")
 
-# Generate detection rules
 url = "https://example.com/threat-report"
 rules = agent.generate_detections(url, rule_format="spl")
 
-# Process rules
 for rule in rules:
     print(f"Rule: {rule.name}")
     print(f"Author: {rule.author}")
@@ -112,7 +145,6 @@ for rule in rules:
 ```python
 from agent import ThreatDetectionAgent
 
-# Custom API keys and settings
 agent = ThreatDetectionAgent(
     llm_provider="openai",
     llm_model="gpt-4",
