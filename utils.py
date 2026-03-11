@@ -32,7 +32,9 @@ def parse_providers_from_env() -> List[str]:
 
 def safe_filename(name: str) -> str:
     """Create a safe filename from a rule name"""
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "rule").strip())[:Settings.MAX_FILENAME_LENGTH]
+    base = re.sub(
+        r"[^A-Za-z0-9._-]+", "_", (name or "rule").strip()
+    )[:Settings.MAX_FILENAME_LENGTH]
     return base or "rule"
 
 

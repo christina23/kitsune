@@ -43,7 +43,9 @@ class DetectionRule(BaseModel):
     name: str
     description: str
     author: str = "Unknown"
-    date: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
+    date: str = Field(
+        default_factory=lambda: datetime.now().strftime("%Y-%m-%d")
+    )
     references: List[str]
     mitre_ttps: List[str]
     rule_content: str

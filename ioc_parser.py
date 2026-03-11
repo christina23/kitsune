@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 
 
-# ── Regex patterns ────────────────────────────────────────────────────────────
+# ── Regex patterns ───────────────────────────────────────────────────────────
 
 # IPv4, optionally with CIDR
 _RE_IP = re.compile(
@@ -30,7 +30,11 @@ _RE_DOMAIN = re.compile(
 )
 
 # MD5, SHA-1, SHA-256 (hex strings of appropriate length)
-_RE_HASH = re.compile(r"\b[0-9a-fA-F]{32}\b|\b[0-9a-fA-F]{40}\b|\b[0-9a-fA-F]{64}\b")
+_RE_HASH = re.compile(
+    r"\b[0-9a-fA-F]{32}\b"
+    r"|\b[0-9a-fA-F]{40}\b"
+    r"|\b[0-9a-fA-F]{64}\b"
+)
 
 # HTTP/HTTPS/FTP URLs
 _RE_URL = re.compile(
@@ -40,7 +44,9 @@ _RE_URL = re.compile(
 
 # File names: anything with a known suspicious extension
 _RE_FILE = re.compile(
-    r"\b[\w\-. ]{1,64}\.(?:exe|dll|bat|ps1|vbs|js|hta|msi|jar|py|sh|elf|bin|dat|tmp|lnk|iso|img)\b",
+    r"\b[\w\-. ]{1,64}"
+    r"\.(?:exe|dll|bat|ps1|vbs|js|hta|msi|jar"
+    r"|py|sh|elf|bin|dat|tmp|lnk|iso|img)\b",
     re.IGNORECASE,
 )
 
@@ -50,7 +56,7 @@ _PRIVATE_IP_RE = re.compile(
 )
 
 
-# ── Model ─────────────────────────────────────────────────────────────────────
+# ── Model ────────────────────────────────────────────────────────────────────
 
 class IOCCollection(BaseModel):
     """Typed container for all IOC categories."""
@@ -61,10 +67,13 @@ class IOCCollection(BaseModel):
     urls: List[str] = []
 
     def is_empty(self) -> bool:
-        return not any([self.ips, self.domains, self.hashes, self.files, self.urls])
+        return not any([
+            self.ips, self.domains, self.hashes, self.files, self.urls
+        ])
 
     def total_count(self) -> int:
-        return sum(len(v) for v in [self.ips, self.domains, self.hashes, self.files, self.urls])
+        items = [self.ips, self.domains, self.hashes, self.files, self.urls]
+        return sum(len(v) for v in items)
 
     def to_dict(self) -> Dict[str, List[str]]:
         return {
@@ -76,7 +85,7 @@ class IOCCollection(BaseModel):
         }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _dedupe(items: List[str]) -> List[str]:
     """Deduplicate while preserving insertion order."""
@@ -104,7 +113,7 @@ def _urls_to_domains(urls: List[str]) -> List[str]:
     return domains
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────
 
 def parse_iocs_from_text(text: str) -> IOCCollection:
     """
@@ -115,7 +124,10 @@ def parse_iocs_from_text(text: str) -> IOCCollection:
     raw_urls = _RE_URL.findall(text)
     # Avoid double-counting domains already captured inside a URL
     url_hosts = set(h.lower() for h in _urls_to_domains(raw_urls))
-    raw_domains = [d for d in _RE_DOMAIN.findall(text) if d.lower() not in url_hosts]
+    raw_domains = [
+        d for d in _RE_DOMAIN.findall(text)
+        if d.lower() not in url_hosts
+    ]
 
     return IOCCollection(
         ips=_dedupe(raw_ips),
@@ -126,7 +138,7 @@ def parse_iocs_from_text(text: str) -> IOCCollection:
     )
 
 
-# ── MITRE TTP Regex ───────────────────────────────────────────────────────────
+# ── MITRE TTP Regex ──────────────────────────────────────────────────────────
 
 _RE_MITRE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
 _RE_MITRE_FULL = re.compile(r"^T\d{4}(\.\d{3})?$")
@@ -195,7 +207,10 @@ def parse_ttps_from_text(text: str) -> List[Technique]:
         end = min(len(text), m.end() + 60)
         ctx = text[start:end].strip()
         techniques.append(
-            Technique(id=tid, tactic=_tactic_for(tid), confidence=0.7, context=ctx)
+            Technique(
+                id=tid, tactic=_tactic_for(tid),
+                confidence=0.7, context=ctx,
+            )
         )
     return techniques
 
@@ -217,18 +232,23 @@ def validate_ttps(llm_ttps: List[str], raw_text: str = "") -> List[Technique]:
         if not _RE_MITRE_FULL.match(tid):
             continue
         conf = 1.0 if (raw_text and tid in raw_text.upper()) else 0.85
-        validated[tid] = Technique(id=tid, tactic=_tactic_for(tid), confidence=conf)
+        validated[tid] = Technique(
+            id=tid, tactic=_tactic_for(tid), confidence=conf
+        )
 
     if raw_text:
         for t in parse_ttps_from_text(raw_text):
             if t.id not in validated:
                 validated[t.id] = t
-            # keep the higher-confidence entry (LLM-validated wins over regex-only)
+            # keep the higher-confidence entry
+            # (LLM-validated wins over regex-only)
 
     return sorted(validated.values(), key=lambda t: t.confidence, reverse=True)
 
 
-def validate_and_enrich_iocs(llm_iocs: dict, raw_text: str = "") -> IOCCollection:
+def validate_and_enrich_iocs(
+    llm_iocs: dict, raw_text: str = ""
+) -> IOCCollection:
     """
     Build a validated IOCCollection from LLM-extracted IOC dict, optionally
     enriched with regex findings from raw_text.
@@ -245,11 +265,23 @@ def validate_and_enrich_iocs(llm_iocs: dict, raw_text: str = "") -> IOCCollectio
             return [val.strip()]
         return []
 
-    llm_ips = [ip for ip in _coerce_list(llm_iocs.get("ips", [])) if _RE_IP.fullmatch(ip) and _is_public_ip(ip)]
-    llm_domains = [d for d in _coerce_list(llm_iocs.get("domains", [])) if _RE_DOMAIN.fullmatch(d)]
-    llm_hashes = [h for h in _coerce_list(llm_iocs.get("hashes", [])) if _RE_HASH.fullmatch(h)]
+    llm_ips = [
+        ip for ip in _coerce_list(llm_iocs.get("ips", []))
+        if _RE_IP.fullmatch(ip) and _is_public_ip(ip)
+    ]
+    llm_domains = [
+        d for d in _coerce_list(llm_iocs.get("domains", []))
+        if _RE_DOMAIN.fullmatch(d)
+    ]
+    llm_hashes = [
+        h for h in _coerce_list(llm_iocs.get("hashes", []))
+        if _RE_HASH.fullmatch(h)
+    ]
     llm_files = _coerce_list(llm_iocs.get("files", []))
-    llm_urls = [u for u in _coerce_list(llm_iocs.get("urls", [])) if _RE_URL.match(u)]
+    llm_urls = [
+        u for u in _coerce_list(llm_iocs.get("urls", []))
+        if _RE_URL.match(u)
+    ]
 
     if raw_text:
         regex_iocs = parse_iocs_from_text(raw_text)
