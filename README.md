@@ -28,7 +28,7 @@ kitsune/
 ├── prompts.py        # Prompt templates
 ├── pyproject.toml    # Python dependencies (for poetry)
 ├── poetry.lock       # Poetry lock file
-├── .env.copy         # Environment variables (copy)
+├── .env              # Environment variables
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
     ├── openai/
@@ -45,14 +45,16 @@ cd kitsune
 
 2. **Install dependencies**:
 ```bash
-Run `poetry install`, assuming you already have Poetry installed.
-If you prefer pip, can also install via `pip install -r requirements.txt`
+poetry install --no-root
+poetry env activate
+source ~/.venv/bin/activate
 ```
 
 3. **Configure environment variables**:
 ```bash
 cp .env.copy .env
 # Edit .env with your API keys
+source .env
 ```
 
 ## Configuration
@@ -76,6 +78,78 @@ INTEL_URL=https://example.com/threat-report
 RULE_FORMAT=spl
 ```
 
+## Quick Start
+
+### Basic Setup
+
+1. Unzip repo
+2. Run `poetry env activate`
+3. Copy last line's output from above, something like `source '~/.venv/bin/activate'`
+4. Run `poetry install --no-root`
+5. Run `python main.py`
+
+<details>
+<summary>Expected Output</summary>
+
+Upon running `main.py`, you should see this output upon successful run (takes a min):
+
+```
+============================================================
+THREAT DETECTION AGENT
+============================================================
+Using providers: anthropic, openai, perplexity
+Processing URL: https://cloud.google.com/blog/topics/threat-intelligence/data-theft-salesforce-instances-via-salesloft-drift
+Rule formats: spl
+============================================================
+Generating rules with provider: ANTHROPIC
+============================================================
+[ANTHROPIC] Generating SPL rules...
+Fetched 10606 characters from URL
+Extracted threat intel for: UNC6395
+Generated 6 SPL rules
+[ANTHROPIC] Wrote 6 SPL rule file(s) to output/anthropic:
+  - UNC6395_OAuth_Token_Abuse_Salesforce_Detection.txt
+  - UNC6395_Bulk_Data_Export_Salesforce_Detection.txt
+  - UNC6395_Credential_Harvesting_Search_Detection.txt
+  - UNC6395_Abnormal_API_Access_Pattern_Detection.txt
+  - UNC6395_Cross_Platform_Token_Reuse_Detection.txt
+  - UNC6395_Third_Party_App_Privilege_Escalation_Detection.txt
+============================================================
+Generating rules with provider: OPENAI
+============================================================
+[OPENAI] Generating SPL rules...
+Fetched 10606 characters from URL
+Extracted threat intel for: UNC6395
+Generated 6 SPL rules
+[OPENAI] Wrote 6 SPL rule file(s) to output/openai:
+  - UNC6395_Data_Exfiltration_Salesforce_Detection.txt
+  - UNC6395_OAuth_Token_Abuse_Salesforce_Detection.txt
+  - UNC6395_Credential_Access_Cloud_Detection.txt
+  - UNC6395_Sensitive_Data_Search_Salesforce_Detection.txt
+  - UNC6395_Anomalous_User_Activity_Salesforce_Detection.txt
+  - UNC6395_Excessive_API_Calls_Salesforce_Detection.txt
+============================================================
+Generating rules with provider: PERPLEXITY
+============================================================
+[PERPLEXITY] Generating SPL rules...
+Fetched 10606 characters from URL
+Extracted threat intel for: UNC6395
+Generated 6 SPL rules
+[PERPLEXITY] Wrote 6 SPL rule file(s) to output/perplexity:
+  - UNC6395_Abnormal_Bulk_Export_Salesforce_Detection.txt
+  - UNC6395_New_OAuth_Application_Salesforce_Detection.txt
+  - UNC6395_Deleted_Job_Logs_Salesforce_Detection.txt
+  - UNC6395_Tor_Cloud_Proxy_Access_Salesforce_Detection.txt
+  - UNC6395_Secrets_Search_Exfiltrated_Data_Detection.txt
+  - UNC6395_Anomalous_SOQL_Usage_Salesforce_Detection.txt
+============================================================
+RULE GENERATION COMPLETE!
+============================================================
+Output directory: output/
+Check each provider subdirectory for generated rules.
+```
+</details>
+
 ## Usage
 
 ### Basic Usage
@@ -85,43 +159,10 @@ python main.py
 ```
 
 This will:
-1. Fetch the URL specified in `INTEL_URL`
-2. Extract threat intelligence (IOCs + MITRE TTPs) using the configured LLM(s)
-3. Validate and confidence-score IOCs and TTPs with regex
-4. Generate detection rules in the format specified by `RULE_FORMAT`
-5. Run coverage gap analysis and print any uncovered techniques to the console
-6. Save rule files to `output/<provider>/`
-
-### Override settings without editing `.env`
-
-```bash
-# Use a single provider and a specific URL
-LLM_PROVIDER=anthropic INTEL_URL=https://example.com/threat-report python main.py
-
-# Generate both SPL and Sigma rules
-RULE_FORMAT=both python main.py
-
-# Enable debug output on errors
-DEBUG=true python main.py
-```
-
-### Console output
-
-A successful run prints:
-
-```
-Fetched 12345 characters from URL
-Extracted threat intel for: APT29 (8 IOCs, 6 TTPs)
-Generated 5 SPL rules
-
-[COVERAGE GAPS] 2 uncovered technique(s):
-  [HIGH] T1059.001 (execution)
-    Data sources needed: Sysmon (EventID 1), PowerShell Script Block Logging
-  [MEDIUM] T1071.001 (command-and-control)
-    Data sources needed: Proxy Logs, Network Flow Logs
-```
-
-Techniques are considered covered if a generated rule references the exact sub-technique ID or its parent (e.g. a rule tagging `T1059` covers `T1059.001`).
+1. Process the URL specified in `INTEL_URL`
+2. Use all providers listed in `LLM_PROVIDERS`
+3. Generate rules in the format specified by `RULE_FORMAT`
+4. Save outputs to `output/<provider>/`
 
 ### Programmatic Usage
 
@@ -230,21 +271,3 @@ CUSTOM_PROMPT = """Your custom prompt template here...
 3. **Rate Limiting**:
    - Adjust retry delays in `config.Settings`
    - Use fewer providers simultaneously
-
-## License
-
-[Your License Here]
-
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## Support
-
-For issues or questions, please create an issue in the repository.
