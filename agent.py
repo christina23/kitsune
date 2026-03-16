@@ -18,20 +18,27 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from models import (
-    ThreatIntelligence, DetectionRule, AgentState,
-    RuleOutput, RulesBundle, CoverageGap
+    ThreatIntelligence,
+    DetectionRule,
+    AgentState,
+    RuleOutput,
+    RulesBundle,
+    CoverageGap,
 )
 from config import Settings
 from llm_factory import LLMFactory
 from utils import (
-    extract_json_from_text, fix_json_formatting, 
-    sanitize_rule_content, determine_author, safe_filename
+    extract_json_from_text,
+    fix_json_formatting,
+    sanitize_rule_content,
+    determine_author,
+    safe_filename,
 )
 from prompts import (
     THREAT_INTEL_EXTRACTION_PROMPT,
     SPL_GENERATION_PROMPT,
     SIGMA_GENERATION_PROMPT,
-    JSON_FORMAT_INSTRUCTIONS_ANTHROPIC
+    JSON_FORMAT_INSTRUCTIONS_ANTHROPIC,
 )
 from ioc_parser import validate_and_enrich_iocs, validate_ttps
 from coverage import analyze_gaps
@@ -41,7 +48,7 @@ class ThreatDetectionAgent:
     """Main agent for generating threat detection rules
     from intelligence sources.
     """
-    
+
     def __init__(
         self,
         llm_provider: Optional[str] = None,
@@ -61,15 +68,12 @@ class ThreatDetectionAgent:
             **llm_kwargs,
         )
         self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=Settings.CHUNK_SIZE, 
-            chunk_overlap=Settings.CHUNK_OVERLAP
+            chunk_size=Settings.CHUNK_SIZE, chunk_overlap=Settings.CHUNK_OVERLAP
         )
         self.workflow = self._create_workflow()
         self.app = self.workflow.compile(checkpointer=MemorySaver())
 
-    def _get_valid_json_response(
-        self, prompt, expected_keys=None, max_retries=3
-    ):
+    def _get_valid_json_response(self, prompt, expected_keys=None, max_retries=3):
         """
         Get a valid JSON response from the LLM with retries
         for malformed responses.
@@ -79,45 +83,40 @@ class ThreatDetectionAgent:
                 if self.llm_provider == "anthropic":
                     # Add explicit JSON-only instruction for Anthropic
                     json_instruction = JSON_FORMAT_INSTRUCTIONS_ANTHROPIC
-                    
+
                     # Modify the prompt to emphasize JSON-only output
                     if isinstance(prompt, ChatPromptTemplate):
                         messages = prompt.messages.copy()
                         # Add JSON instruction to the last human message
                         if messages and isinstance(messages[-1], HumanMessage):
                             messages[-1].content = (
-                                f"{messages[-1].content}"
-                                f"\n\n{json_instruction}"
+                                f"{messages[-1].content}" f"\n\n{json_instruction}"
                             )
-                        modified_prompt = (
-                            ChatPromptTemplate.from_messages(messages)
-                        )
+                        modified_prompt = ChatPromptTemplate.from_messages(messages)
                     else:
                         modified_prompt = prompt
-                    
+
                     chain = modified_prompt | self.llm
                 else:
                     chain = prompt | self.llm
-                
+
                 response = chain.invoke({})
                 response_text = (
-                    response.content
-                    if hasattr(response, "content")
-                    else str(response)
+                    response.content if hasattr(response, "content") else str(response)
                 )
-                
+
                 # Extract and validate JSON
                 result = extract_json_from_text(response_text)
-                
+
                 # Validate expected keys if provided
                 if expected_keys:
                     for key in expected_keys:
                         if key not in result:
                             raise ValueError(f"Missing expected key: {key}")
-                
+
                 return result
-                
-            except (Exception) as e:
+
+            except Exception as e:
                 if attempt == max_retries - 1:
                     print(f"All attempts failed to get valid JSON: {e}")
                     raise
@@ -183,9 +182,7 @@ class ThreatDetectionAgent:
             full_text = "\n".join([doc.page_content for doc in documents])
             chunks = self.splitter.split_text(full_text)
             relevant_content = (
-                "\n".join(chunks[:3] + chunks[-2:])
-                if len(chunks) > 5
-                else full_text
+                "\n".join(chunks[:3] + chunks[-2:]) if len(chunks) > 5 else full_text
             )
             state["content"] = relevant_content
             print(f"Fetched {len(relevant_content)} characters from URL")
@@ -216,17 +213,18 @@ class ThreatDetectionAgent:
             raw_intel = self._get_valid_json_response(
                 extraction_prompt,
                 expected_keys=[
-                    "threat_actor", "iocs", "attack_description",
-                    "targeted_systems", "key_behaviors",
-                ]
+                    "threat_actor",
+                    "iocs",
+                    "attack_description",
+                    "targeted_systems",
+                    "key_behaviors",
+                ],
             )
 
             # Ensure all required fields are present with defaults
             raw_intel.setdefault("threat_actor", None)
             raw_intel.setdefault("campaign_name", None)
-            raw_intel.setdefault(
-                "attack_description", "Unknown attack methodology"
-            )
+            raw_intel.setdefault("attack_description", "Unknown attack methodology")
             raw_intel.setdefault("targeted_systems", [])
             raw_intel.setdefault("key_behaviors", [])
 
@@ -275,11 +273,7 @@ class ThreatDetectionAgent:
             "rule_format": rule_format,
             "error": None,
         }
-        config = {
-            "configurable": {
-                "thread_id": f"threat-detection-{hash(url) % 1000}"
-            }
-        }
+        config = {"configurable": {"thread_id": f"threat-detection-{hash(url) % 1000}"}}
 
         try:
             result = self.app.invoke(initial_state, config)
@@ -309,23 +303,19 @@ class ThreatDetectionAgent:
         """Generate Splunk SPL detection rules"""
         if not state.get("threat_intel"):
             state["detection_rules"] = []
-            state["error"] = (
-                "No threat intelligence available for rule generation"
-            )
+            state["error"] = "No threat intelligence available for rule generation"
             return state
 
         intel = state["threat_intel"]
         author = determine_author(state["url"], intel.threat_actor)
 
         prompt_content = SPL_GENERATION_PROMPT.format(
-            threat_actor=intel.threat_actor or 'Unknown',
-            campaign_name=intel.campaign_name or 'N/A',
-            mitre_ttps=', '.join(
-                f"{t.id}({t.tactic})" for t in intel.techniques
-            ),
+            threat_actor=intel.threat_actor or "Unknown",
+            campaign_name=intel.campaign_name or "N/A",
+            mitre_ttps=", ".join(f"{t.id}({t.tactic})" for t in intel.techniques),
             attack_description=intel.attack_description,
-            key_behaviors=', '.join(intel.key_behaviors or []),
-            targeted_systems=', '.join(intel.targeted_systems or []),
+            key_behaviors=", ".join(intel.key_behaviors or []),
+            targeted_systems=", ".join(intel.targeted_systems or []),
             iocs=intel.iocs.to_dict() if intel.iocs else {},
             json_format_section=(
                 JSON_FORMAT_INSTRUCTIONS_ANTHROPIC
@@ -350,11 +340,9 @@ class ThreatDetectionAgent:
 
         try:
             bundle_data = self._get_valid_json_response(
-                prompt, 
-                expected_keys=["rules"],
-                max_retries=3
+                prompt, expected_keys=["rules"], max_retries=3
             )
-            
+
             rules_list = bundle_data.get("rules", [])
             state["detection_rules"] = self._finalize_rules(
                 rules_list,
@@ -374,23 +362,19 @@ class ThreatDetectionAgent:
         """Generate Sigma detection rules"""
         if not state.get("threat_intel"):
             state["detection_rules"] = []
-            state["error"] = (
-                "No threat intelligence available for rule generation"
-            )
+            state["error"] = "No threat intelligence available for rule generation"
             return state
-        
+
         intel = state["threat_intel"]
         author = determine_author(state["url"], intel.threat_actor)
-        
+
         prompt_content = SIGMA_GENERATION_PROMPT.format(
-            threat_actor=intel.threat_actor or 'Unknown',
-            campaign_name=intel.campaign_name or 'N/A',
-            mitre_ttps=', '.join(
-                f"{t.id}({t.tactic})" for t in intel.techniques
-            ),
+            threat_actor=intel.threat_actor or "Unknown",
+            campaign_name=intel.campaign_name or "N/A",
+            mitre_ttps=", ".join(f"{t.id}({t.tactic})" for t in intel.techniques),
             attack_description=intel.attack_description,
-            key_behaviors=', '.join(intel.key_behaviors or []),
-            targeted_systems=', '.join(intel.targeted_systems or []),
+            key_behaviors=", ".join(intel.key_behaviors or []),
+            targeted_systems=", ".join(intel.targeted_systems or []),
             iocs=intel.iocs.to_dict() if intel.iocs else {},
             json_format_section=(
                 JSON_FORMAT_INSTRUCTIONS_ANTHROPIC
@@ -414,11 +398,9 @@ class ThreatDetectionAgent:
 
         try:
             bundle_data = self._get_valid_json_response(
-                prompt,
-                expected_keys=["rules"],
-                max_retries=3
+                prompt, expected_keys=["rules"], max_retries=3
             )
-            
+
             rules_list = bundle_data.get("rules", [])
             state["detection_rules"] = self._finalize_rules(
                 rules_list,
@@ -443,19 +425,10 @@ class ThreatDetectionAgent:
         if gaps:
             print(f"\n[COVERAGE GAPS] {len(gaps)} uncovered technique(s):")
             for g in gaps:
-                print(
-                    f"  [{g.priority.upper()}]"
-                    f" {g.technique_id} ({g.tactic})"
-                )
-                print(
-                    "    Data sources needed: "
-                    + ", ".join(g.data_sources[:2])
-                )
+                print(f"  [{g.priority.upper()}]" f" {g.technique_id} ({g.tactic})")
+                print("    Data sources needed: " + ", ".join(g.data_sources[:2]))
         else:
-            print(
-                "[COVERAGE] All techniques have corresponding"
-                " detection rules."
-            )
+            print("[COVERAGE] All techniques have corresponding" " detection rules.")
         return state
 
     def _finalize_rules(
@@ -484,8 +457,7 @@ class ThreatDetectionAgent:
                         name=ro.get("name", "Unknown Rule"),
                         description=ro.get(
                             "description",
-                            "Detection rule generated"
-                            " from threat intelligence",
+                            "Detection rule generated" " from threat intelligence",
                         ),
                         rule_content=ro.get("rule_content", ""),
                         mitre_ttps=ro.get("mitre_ttps", []),
@@ -503,7 +475,7 @@ class ThreatDetectionAgent:
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
-            
+
             mitre = ro.mitre_ttps if getattr(ro, "mitre_ttps", None) else []
             rule = DetectionRule(
                 name=ro.name,

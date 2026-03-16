@@ -16,7 +16,7 @@ from config import Settings
 def process_provider(provider: str, url: str, rule_formats: List[str]) -> None:
     """
     Process a single provider to generate detection rules
-    
+
     Args:
         provider: LLM provider name
         url: URL to extract threat intelligence from
@@ -34,10 +34,7 @@ def process_provider(provider: str, url: str, rule_formats: List[str]) -> None:
             rules = agent.generate_detections(url, rule_format=fmt)
 
             if not rules:
-                print(
-                    f"[{provider.upper()}] No rules generated"
-                    f" for {fmt.upper()}"
-                )
+                print(f"[{provider.upper()}] No rules generated" f" for {fmt.upper()}")
                 continue
 
             # Save rules to files
@@ -76,16 +73,16 @@ def main():
         "https://cloud.google.com/blog/topics/threat-intelligence/"
         "data-theft-salesforce-instances-via-salesloft-drift",
     )
-    
+
     # RULE_FORMAT: "spl" | "sigma" | "both"
     rule_format_env = (os.getenv("RULE_FORMAT", "spl")).lower()
-    
+
     # Determine which formats to generate
     if rule_format_env == "both":
         rule_formats = ["spl", "sigma"]
     else:
         rule_formats = [rule_format_env]
-    
+
     # Get list of providers to use
     providers = parse_providers_from_env()
 

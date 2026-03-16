@@ -11,7 +11,6 @@ from typing import Dict, List
 from ioc_parser import Technique
 from models import DetectionRule, CoverageGap
 
-
 # Maps top-level technique IDs to the log sources most likely to detect them
 TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {
     "T1003": [
@@ -20,20 +19,14 @@ TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {
         "PowerShell Logging",
     ],
     "T1005": ["File Audit Logs", "Sysmon (EventID 11)", "DLP Telemetry"],
-    "T1020": [
-        "Network Flow Logs", "Proxy Logs", "Cloud Storage Audit Logs"
-    ],
+    "T1020": ["Network Flow Logs", "Proxy Logs", "Cloud Storage Audit Logs"],
     "T1021": [
         "Windows Security Events (4624, 4648)",
         "Sysmon (EventID 3)",
         "RDP Logs",
     ],
-    "T1027": [
-        "Sysmon (EventID 1)", "AV/EDR Telemetry", "File Audit Logs"
-    ],
-    "T1046": [
-        "Network Flow Logs", "Sysmon (EventID 3)", "IDS/IPS Alerts"
-    ],
+    "T1027": ["Sysmon (EventID 1)", "AV/EDR Telemetry", "File Audit Logs"],
+    "T1046": ["Network Flow Logs", "Sysmon (EventID 3)", "IDS/IPS Alerts"],
     "T1047": [
         "Windows Security Events (4688)",
         "Sysmon (EventID 1)",
@@ -86,9 +79,7 @@ TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {
         "Cloud IAM Audit Logs",
         "Directory Service Logs",
     ],
-    "T1105": [
-        "Network Flow Logs", "Proxy Logs", "Sysmon (EventID 3, 11)"
-    ],
+    "T1105": ["Network Flow Logs", "Proxy Logs", "Sysmon (EventID 3, 11)"],
     "T1110": [
         "Windows Security Events (4625)",
         "Cloud Authentication Logs",
@@ -109,17 +100,13 @@ TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {
         "IDS/IPS Alerts",
         "Network Flow Logs",
     ],
-    "T1204": [
-        "Sysmon (EventID 1, 11)", "Email Gateway Logs", "Endpoint AV Logs"
-    ],
+    "T1204": ["Sysmon (EventID 1, 11)", "Email Gateway Logs", "Endpoint AV Logs"],
     "T1218": [
         "Sysmon (EventID 1)",
         "Windows Security Events (4688)",
         "EDR Telemetry",
     ],
-    "T1486": [
-        "Sysmon (EventID 11)", "File Audit Logs", "Volume Shadow Copy Logs"
-    ],
+    "T1486": ["Sysmon (EventID 11)", "File Audit Logs", "Volume Shadow Copy Logs"],
     "T1490": [
         "Windows Security Events (4688)",
         "Sysmon (EventID 1)",

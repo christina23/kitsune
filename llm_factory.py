@@ -14,15 +14,13 @@ from config import LLMConfig
 
 class LLMFactory:
     """Factory for creating LLM instances"""
-    
+
     def __init__(
         self,
         default_provider: Optional[str] = None,
         api_keys: Optional[Dict[str, str]] = None,
     ):
-        self.default_provider = (
-            default_provider or os.getenv("LLM_PROVIDER", "openai")
-        )
+        self.default_provider = default_provider or os.getenv("LLM_PROVIDER", "openai")
         self.api_keys = api_keys or {}
         self._validate_environment()
 
@@ -72,9 +70,7 @@ class LLMFactory:
                 model=anthropic_model,
                 anthropic_api_key=final_api_key,
                 temperature=temperature,
-                max_tokens=kwargs.pop(
-                    "max_tokens", config.get("max_tokens", 4096)
-                ),
+                max_tokens=kwargs.pop("max_tokens", config.get("max_tokens", 4096)),
                 **kwargs,
             )
         elif provider_enum == LLMProvider.OPENAI:
@@ -82,9 +78,7 @@ class LLMFactory:
                 model=model,
                 api_key=final_api_key,
                 temperature=temperature,
-                max_tokens=kwargs.pop(
-                    "max_tokens", config.get("max_tokens", 4096)
-                ),
+                max_tokens=kwargs.pop("max_tokens", config.get("max_tokens", 4096)),
                 **kwargs,
             )
         else:

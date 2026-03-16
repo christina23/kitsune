@@ -12,12 +12,14 @@ from ioc_parser import IOCCollection, Technique
 
 class LLMProvider(Enum):
     """Supported LLM providers"""
+
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
 
 
 class CoverageGap(BaseModel):
     """A MITRE technique with no corresponding detection rule."""
+
     technique_id: str
     tactic: str
     priority: Literal["high", "medium", "low"]
@@ -28,6 +30,7 @@ class CoverageGap(BaseModel):
 
 class ThreatIntelligence(BaseModel):
     """Extracted threat intelligence data"""
+
     threat_actor: Optional[str]
     campaign_name: Optional[str]
     techniques: List[Technique] = []
@@ -39,12 +42,11 @@ class ThreatIntelligence(BaseModel):
 
 class DetectionRule(BaseModel):
     """Detection rule with metadata"""
+
     name: str
     description: str
     author: str = "Unknown"
-    date: str = Field(
-        default_factory=lambda: datetime.now().strftime("%Y-%m-%d")
-    )
+    date: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
     references: List[str]
     mitre_ttps: List[str]
     rule_content: str
@@ -53,6 +55,7 @@ class DetectionRule(BaseModel):
 
 class RuleOutput(BaseModel):
     """Individual rule output from LLM"""
+
     name: str
     description: str
     rule_content: str
@@ -61,11 +64,13 @@ class RuleOutput(BaseModel):
 
 class RulesBundle(BaseModel):
     """Bundle of multiple rules"""
+
     rules: List[RuleOutput]
 
 
 class AgentState(TypedDict):
     """State for the LangGraph workflow"""
+
     url: str
     content: str
     threat_intel: Optional[ThreatIntelligence]
