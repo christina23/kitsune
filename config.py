@@ -12,7 +12,9 @@ class LLMConfig:
 
     DEFAULTS: Dict[LLMProvider, Dict[str, Any]] = {
         LLMProvider.ANTHROPIC: {
-            "model": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
+            "model": os.getenv(
+                "ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"
+            ),
             "api_key_env": "ANTHROPIC_API_KEY",
             "max_tokens": 4096,
         },

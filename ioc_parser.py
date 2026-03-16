@@ -48,7 +48,9 @@ _RE_FILE = re.compile(
 )
 
 # Noise: IPs that are obviously not IOCs
-_PRIVATE_IP_RE = re.compile(r"^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)")
+_PRIVATE_IP_RE = re.compile(
+    r"^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)"
+)
 
 
 # ── Model ────────────────────────────────────────────────────────────────────
@@ -64,7 +66,9 @@ class IOCCollection(BaseModel):
     urls: List[str] = []
 
     def is_empty(self) -> bool:
-        return not any([self.ips, self.domains, self.hashes, self.files, self.urls])
+        return not any(
+            [self.ips, self.domains, self.hashes, self.files, self.urls]
+        )
 
     def total_count(self) -> int:
         items = [self.ips, self.domains, self.hashes, self.files, self.urls]
@@ -121,7 +125,9 @@ def parse_iocs_from_text(text: str) -> IOCCollection:
     raw_urls = _RE_URL.findall(text)
     # Avoid double-counting domains already captured inside a URL
     url_hosts = set(h.lower() for h in _urls_to_domains(raw_urls))
-    raw_domains = [d for d in _RE_DOMAIN.findall(text) if d.lower() not in url_hosts]
+    raw_domains = [
+        d for d in _RE_DOMAIN.findall(text) if d.lower() not in url_hosts
+    ]
 
     return IOCCollection(
         ips=_dedupe(raw_ips),
@@ -229,7 +235,9 @@ def validate_ttps(llm_ttps: List[str], raw_text: str = "") -> List[Technique]:
         if not _RE_MITRE_FULL.match(tid):
             continue
         conf = 1.0 if (raw_text and tid in raw_text.upper()) else 0.85
-        validated[tid] = Technique(id=tid, tactic=_tactic_for(tid), confidence=conf)
+        validated[tid] = Technique(
+            id=tid, tactic=_tactic_for(tid), confidence=conf
+        )
 
     if raw_text:
         for t in parse_ttps_from_text(raw_text):
@@ -241,7 +249,9 @@ def validate_ttps(llm_ttps: List[str], raw_text: str = "") -> List[Technique]:
     return sorted(validated.values(), key=lambda t: t.confidence, reverse=True)
 
 
-def validate_and_enrich_iocs(llm_iocs: dict, raw_text: str = "") -> IOCCollection:
+def validate_and_enrich_iocs(
+    llm_iocs: dict, raw_text: str = ""
+) -> IOCCollection:
     """
     Build a validated IOCCollection from LLM-extracted IOC dict, optionally
     enriched with regex findings from raw_text.
@@ -265,13 +275,19 @@ def validate_and_enrich_iocs(llm_iocs: dict, raw_text: str = "") -> IOCCollectio
         if _RE_IP.fullmatch(ip) and _is_public_ip(ip)
     ]
     llm_domains = [
-        d for d in _coerce_list(llm_iocs.get("domains", [])) if _RE_DOMAIN.fullmatch(d)
+        d
+        for d in _coerce_list(llm_iocs.get("domains", []))
+        if _RE_DOMAIN.fullmatch(d)
     ]
     llm_hashes = [
-        h for h in _coerce_list(llm_iocs.get("hashes", [])) if _RE_HASH.fullmatch(h)
+        h
+        for h in _coerce_list(llm_iocs.get("hashes", []))
+        if _RE_HASH.fullmatch(h)
     ]
     llm_files = _coerce_list(llm_iocs.get("files", []))
-    llm_urls = [u for u in _coerce_list(llm_iocs.get("urls", [])) if _RE_URL.match(u)]
+    llm_urls = [
+        u for u in _coerce_list(llm_iocs.get("urls", [])) if _RE_URL.match(u)
+    ]
 
     if raw_text:
         regex_iocs = parse_iocs_from_text(raw_text)

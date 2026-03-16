@@ -68,12 +68,15 @@ class ThreatDetectionAgent:
             **llm_kwargs,
         )
         self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=Settings.CHUNK_SIZE, chunk_overlap=Settings.CHUNK_OVERLAP
+            chunk_size=Settings.CHUNK_SIZE,
+            chunk_overlap=Settings.CHUNK_OVERLAP,
         )
         self.workflow = self._create_workflow()
         self.app = self.workflow.compile(checkpointer=MemorySaver())
 
-    def _get_valid_json_response(self, prompt, expected_keys=None, max_retries=3):
+    def _get_valid_json_response(
+        self, prompt, expected_keys=None, max_retries=3
+    ):
         """
         Get a valid JSON response from the LLM with retries
         for malformed responses.
@@ -90,9 +93,12 @@ class ThreatDetectionAgent:
                         # Add JSON instruction to the last human message
                         if messages and isinstance(messages[-1], HumanMessage):
                             messages[-1].content = (
-                                f"{messages[-1].content}" f"\n\n{json_instruction}"
+                                f"{messages[-1].content}"
+                                f"\n\n{json_instruction}"
                             )
-                        modified_prompt = ChatPromptTemplate.from_messages(messages)
+                        modified_prompt = ChatPromptTemplate.from_messages(
+                            messages
+                        )
                     else:
                         modified_prompt = prompt
 
@@ -102,7 +108,9 @@ class ThreatDetectionAgent:
 
                 response = chain.invoke({})
                 response_text = (
-                    response.content if hasattr(response, "content") else str(response)
+                    response.content
+                    if hasattr(response, "content")
+                    else str(response)
                 )
 
                 # Extract and validate JSON
@@ -182,7 +190,9 @@ class ThreatDetectionAgent:
             full_text = "\n".join([doc.page_content for doc in documents])
             chunks = self.splitter.split_text(full_text)
             relevant_content = (
-                "\n".join(chunks[:3] + chunks[-2:]) if len(chunks) > 5 else full_text
+                "\n".join(chunks[:3] + chunks[-2:])
+                if len(chunks) > 5
+                else full_text
             )
             state["content"] = relevant_content
             print(f"Fetched {len(relevant_content)} characters from URL")
@@ -224,7 +234,9 @@ class ThreatDetectionAgent:
             # Ensure all required fields are present with defaults
             raw_intel.setdefault("threat_actor", None)
             raw_intel.setdefault("campaign_name", None)
-            raw_intel.setdefault("attack_description", "Unknown attack methodology")
+            raw_intel.setdefault(
+                "attack_description", "Unknown attack methodology"
+            )
             raw_intel.setdefault("targeted_systems", [])
             raw_intel.setdefault("key_behaviors", [])
 
@@ -273,7 +285,11 @@ class ThreatDetectionAgent:
             "rule_format": rule_format,
             "error": None,
         }
-        config = {"configurable": {"thread_id": f"threat-detection-{hash(url) % 1000}"}}
+        config = {
+            "configurable": {
+                "thread_id": f"threat-detection-{hash(url) % 1000}"
+            }
+        }
 
         try:
             result = self.app.invoke(initial_state, config)
@@ -303,7 +319,9 @@ class ThreatDetectionAgent:
         """Generate Splunk SPL detection rules"""
         if not state.get("threat_intel"):
             state["detection_rules"] = []
-            state["error"] = "No threat intelligence available for rule generation"
+            state["error"] = (
+                "No threat intelligence available for rule generation"
+            )
             return state
 
         intel = state["threat_intel"]
@@ -312,7 +330,9 @@ class ThreatDetectionAgent:
         prompt_content = SPL_GENERATION_PROMPT.format(
             threat_actor=intel.threat_actor or "Unknown",
             campaign_name=intel.campaign_name or "N/A",
-            mitre_ttps=", ".join(f"{t.id}({t.tactic})" for t in intel.techniques),
+            mitre_ttps=", ".join(
+                f"{t.id}({t.tactic})" for t in intel.techniques
+            ),
             attack_description=intel.attack_description,
             key_behaviors=", ".join(intel.key_behaviors or []),
             targeted_systems=", ".join(intel.targeted_systems or []),
@@ -362,7 +382,9 @@ class ThreatDetectionAgent:
         """Generate Sigma detection rules"""
         if not state.get("threat_intel"):
             state["detection_rules"] = []
-            state["error"] = "No threat intelligence available for rule generation"
+            state["error"] = (
+                "No threat intelligence available for rule generation"
+            )
             return state
 
         intel = state["threat_intel"]
@@ -371,7 +393,9 @@ class ThreatDetectionAgent:
         prompt_content = SIGMA_GENERATION_PROMPT.format(
             threat_actor=intel.threat_actor or "Unknown",
             campaign_name=intel.campaign_name or "N/A",
-            mitre_ttps=", ".join(f"{t.id}({t.tactic})" for t in intel.techniques),
+            mitre_ttps=", ".join(
+                f"{t.id}({t.tactic})" for t in intel.techniques
+            ),
             attack_description=intel.attack_description,
             key_behaviors=", ".join(intel.key_behaviors or []),
             targeted_systems=", ".join(intel.targeted_systems or []),
@@ -425,10 +449,18 @@ class ThreatDetectionAgent:
         if gaps:
             print(f"\n[COVERAGE GAPS] {len(gaps)} uncovered technique(s):")
             for g in gaps:
-                print(f"  [{g.priority.upper()}]" f" {g.technique_id} ({g.tactic})")
-                print("    Data sources needed: " + ", ".join(g.data_sources[:2]))
+                print(
+                    f"  [{g.priority.upper()}]"
+                    f" {g.technique_id} ({g.tactic})"
+                )
+                print(
+                    "    Data sources needed: " + ", ".join(g.data_sources[:2])
+                )
         else:
-            print("[COVERAGE] All techniques have corresponding" " detection rules.")
+            print(
+                "[COVERAGE] All techniques have corresponding"
+                " detection rules."
+            )
         return state
 
     def _finalize_rules(
@@ -457,7 +489,8 @@ class ThreatDetectionAgent:
                         name=ro.get("name", "Unknown Rule"),
                         description=ro.get(
                             "description",
-                            "Detection rule generated" " from threat intelligence",
+                            "Detection rule generated"
+                            " from threat intelligence",
                         ),
                         rule_content=ro.get("rule_content", ""),
                         mitre_ttps=ro.get("mitre_ttps", []),

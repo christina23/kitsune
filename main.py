@@ -34,7 +34,10 @@ def process_provider(provider: str, url: str, rule_formats: List[str]) -> None:
             rules = agent.generate_detections(url, rule_format=fmt)
 
             if not rules:
-                print(f"[{provider.upper()}] No rules generated" f" for {fmt.upper()}")
+                print(
+                    f"[{provider.upper()}] No rules generated"
+                    f" for {fmt.upper()}"
+                )
                 continue
 
             # Save rules to files

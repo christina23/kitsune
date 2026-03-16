@@ -100,13 +100,21 @@ TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {
         "IDS/IPS Alerts",
         "Network Flow Logs",
     ],
-    "T1204": ["Sysmon (EventID 1, 11)", "Email Gateway Logs", "Endpoint AV Logs"],
+    "T1204": [
+        "Sysmon (EventID 1, 11)",
+        "Email Gateway Logs",
+        "Endpoint AV Logs",
+    ],
     "T1218": [
         "Sysmon (EventID 1)",
         "Windows Security Events (4688)",
         "EDR Telemetry",
     ],
-    "T1486": ["Sysmon (EventID 11)", "File Audit Logs", "Volume Shadow Copy Logs"],
+    "T1486": [
+        "Sysmon (EventID 11)",
+        "File Audit Logs",
+        "Volume Shadow Copy Logs",
+    ],
     "T1490": [
         "Windows Security Events (4688)",
         "Sysmon (EventID 1)",
