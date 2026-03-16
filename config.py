@@ -22,11 +22,6 @@ class LLMConfig:
             "api_key_env": "OPENAI_API_KEY",
             "max_tokens": 4096,
         },
-        LLMProvider.PERPLEXITY: {
-            "model": os.getenv("PERPLEXITY_MODEL", "sonar-pro"),
-            "api_key_env": "PERPLEXITY_API_KEY",
-            "max_tokens": 4096,
-        },
     }
 
 

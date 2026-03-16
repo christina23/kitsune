@@ -14,7 +14,6 @@ class LLMProvider(Enum):
     """Supported LLM providers"""
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
-    PERPLEXITY = "perplexity"
 
 
 class CoverageGap(BaseModel):

@@ -7,7 +7,6 @@ from typing import Dict, Optional
 from langchain_core.language_models import BaseChatModel
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
-from langchain_perplexity import ChatPerplexity
 
 from models import LLMProvider
 from config import LLMConfig
@@ -82,16 +81,6 @@ class LLMFactory:
             return ChatOpenAI(
                 model=model,
                 api_key=final_api_key,
-                temperature=temperature,
-                max_tokens=kwargs.pop(
-                    "max_tokens", config.get("max_tokens", 4096)
-                ),
-                **kwargs,
-            )
-        elif provider_enum == LLMProvider.PERPLEXITY:
-            return ChatPerplexity(
-                model=model,
-                pplx_api_key=final_api_key,
                 temperature=temperature,
                 max_tokens=kwargs.pop(
                     "max_tokens", config.get("max_tokens", 4096)
