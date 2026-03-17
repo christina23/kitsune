@@ -12,6 +12,31 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 - **Coverage Gap Analysis**: After rule generation, compares extracted techniques against the generated rules and reports which TTPs have no detection coverage, with priority (high/medium/low) and recommended data sources
 - **Author Attribution**: Automatically attributes rules based on the source
 - **Error Recovery**: Fallback mechanisms ensure you always get usable output
+- **Redis Store**: Optional persistent IOC and detection rule store backed by Redis, with actor/TTP indexing and trend analytics
+- **Search UI**: Streamlit app for querying the store across IOCs, rules, actors, trends, and coverage gaps
+- **REST API**: FastAPI backend with Scalar and Swagger interactive docs
+
+## Web Interfaces
+
+Kitsune includes a search UI and REST API for querying the Redis store interactively.
+
+| Interface | URL | Description |
+|-----------|-----|-------------|
+| **Search UI** | `http://localhost:8501` | Streamlit app — search IOCs, rules, actors, trends, and coverage. API doc links are in the collapsible left sidebar. |
+| **Scalar API Docs** | `http://localhost:8000/scalar` | Interactive API reference with Python `requests` code examples and built-in dark/light mode. |
+| **Swagger UI** | `http://localhost:8000/docs` | Classic Swagger UI with dark mode toggle and try-it-out support. |
+
+### Running the interfaces
+
+```bash
+# Terminal 1 — REST API (required by the UI)
+uvicorn api:app --reload --port 8000
+
+# Terminal 2 — Search UI
+streamlit run app.py
+```
+
+> **Note:** Set `REDIS_URL` in your `.env` (e.g. `REDIS_URL=redis://localhost:6379`) before starting the API, otherwise query endpoints will return 503.
 
 ## Project Structure
 
@@ -26,15 +51,55 @@ kitsune/
 ├── llm_factory.py    # LLM provider factory
 ├── utils.py          # Utility functions
 ├── prompts.py        # Prompt templates
-├── pyproject.toml    # Python dependencies (for poetry)
-├── poetry.lock       # Poetry lock file
-├── .env              # Environment variables
+├── api.py            # FastAPI REST API (Scalar + Swagger docs)
+├── app.py            # Streamlit search UI
+├── Dockerfile        # Container image definition
+├── docker-compose.yml# Orchestrates Redis, API, and UI services
+├── pyproject.toml    # Python project metadata and dependencies (Poetry)
+├── poetry.lock       # Pinned dependency versions
+├── .env              # Environment variables (copy from .env.copy)
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
     └── openai/
 ```
 
 ## Installation
+
+### Docker (recommended)
+
+The easiest way to run Kitsune — no Python environment needed.
+
+1. **Clone the repository**:
+```bash
+git clone <repository-url>
+cd kitsune
+```
+
+2. **Configure environment variables**:
+```bash
+cp .env.copy .env
+# Edit .env — add your ANTHROPIC_API_KEY and/or OPENAI_API_KEY
+```
+
+3. **Build and start all services**:
+```bash
+docker compose up --build
+```
+
+That's it. Services start in order (Redis → API → UI):
+
+| Service | URL |
+|---------|-----|
+| Search UI | http://localhost:8501 |
+| Scalar API Docs | http://localhost:8000/scalar |
+| Swagger UI | http://localhost:8000/docs |
+
+To stop: `docker compose down`
+To stop and wipe Redis data: `docker compose down -v`
+
+---
+
+### Local (manual)
 
 1. **Clone the repository**:
 ```bash
@@ -56,6 +121,20 @@ cp .env.copy .env
 source .env
 ```
 
+4. **Start Redis** (if not already running):
+```bash
+docker run -d --name kitsune-redis -p 6379:6379 redis:alpine
+```
+
+5. **Start the API and UI** (two terminals):
+```bash
+# Terminal 1
+uvicorn api:app --reload --port 8000
+
+# Terminal 2
+streamlit run app.py
+```
+
 ## Configuration
 
 ### Environment Variables
@@ -67,6 +146,8 @@ source .env
 - `OPENAI_MODEL`: OpenAI model to use (default: `gpt-4o-mini`)
 - `INTEL_URL`: URL of the threat intelligence report to process
 - `RULE_FORMAT`: Output format - "spl", "sigma", or "both"
+- `REDIS_URL`: Redis connection URL (default: `redis://localhost:6379`) — enables persistent store, search UI, and API
+- `REDIS_KEY_PREFIX`: Namespace prefix for Redis keys (default: `kitsune`)
 
 ### Example .env file
 
@@ -76,6 +157,7 @@ ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...
 INTEL_URL=https://example.com/threat-report
 RULE_FORMAT=sigma
+REDIS_URL=redis://localhost:6379
 ```
 
 ## Quick Start
@@ -256,3 +338,8 @@ CUSTOM_PROMPT = """Your custom prompt template here...
 3. **Rate Limiting**:
    - Adjust retry delays in `config.Settings`
    - Use fewer providers simultaneously
+
+4. **Redis / API unavailable**:
+   - Ensure Redis is running: `docker run -d --name kitsune-redis -p 6379:6379 redis:alpine`
+   - Confirm `REDIS_URL` is set in `.env` and the API was started from the `kitsune/` directory
+   - Run the API as: `cd kitsune && uvicorn api:app --reload --port 8000`
