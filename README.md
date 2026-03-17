@@ -55,8 +55,8 @@ kitsune/
 ├── app.py            # Streamlit search UI
 ├── Dockerfile        # Container image definition
 ├── docker-compose.yml# Orchestrates Redis, API, and UI services
-├── requirements.txt  # Pinned Python dependencies
-├── pyproject.toml    # Python project metadata
+├── pyproject.toml    # Python project metadata and dependencies (Poetry)
+├── poetry.lock       # Pinned dependency versions
 ├── .env              # Environment variables (copy from .env.copy)
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/

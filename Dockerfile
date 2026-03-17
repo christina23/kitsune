@@ -7,9 +7,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Poetry
+RUN pip install --no-cache-dir "poetry>=2.0.0"
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock ./
+
+# Install dependencies (no virtualenv inside container)
+RUN poetry config virtualenvs.create false \
+    && poetry install --no-root --no-interaction
 
 # Copy application code
 COPY . .
