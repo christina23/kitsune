@@ -12,6 +12,9 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 - **Coverage Gap Analysis**: After rule generation, compares extracted techniques against the generated rules and reports which TTPs have no detection coverage, with priority (high/medium/low) and recommended data sources
 - **Author Attribution**: Automatically attributes rules based on the source
 - **Error Recovery**: Fallback mechanisms ensure you always get usable output
+- **Redis Store**: Optional persistent IOC and detection rule store backed by Redis, with actor/TTP indexing and trend analytics
+- **Search UI**: Streamlit app for querying the store across IOCs, rules, actors, trends, and coverage gaps
+- **REST API**: FastAPI backend with Scalar and Swagger interactive docs
 
 ## Web Interfaces
 
@@ -91,6 +94,8 @@ source .env
 - `OPENAI_MODEL`: OpenAI model to use (default: `gpt-4o-mini`)
 - `INTEL_URL`: URL of the threat intelligence report to process
 - `RULE_FORMAT`: Output format - "spl", "sigma", or "both"
+- `REDIS_URL`: Redis connection URL (default: `redis://localhost:6379`) — enables persistent store, search UI, and API
+- `REDIS_KEY_PREFIX`: Namespace prefix for Redis keys (default: `kitsune`)
 
 ### Example .env file
 
@@ -100,6 +105,7 @@ ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...
 INTEL_URL=https://example.com/threat-report
 RULE_FORMAT=sigma
+REDIS_URL=redis://localhost:6379
 ```
 
 ## Quick Start
@@ -280,3 +286,8 @@ CUSTOM_PROMPT = """Your custom prompt template here...
 3. **Rate Limiting**:
    - Adjust retry delays in `config.Settings`
    - Use fewer providers simultaneously
+
+4. **Redis / API unavailable**:
+   - Ensure Redis is running: `docker run -d --name kitsune-redis -p 6379:6379 redis:alpine`
+   - Confirm `REDIS_URL` is set in `.env` and the API was started from the `kitsune/` directory
+   - Run the API as: `cd kitsune && uvicorn api:app --reload --port 8000`
