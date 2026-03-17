@@ -23,7 +23,7 @@ load_dotenv()
 
 # Allow running from repo root without installing the package
 sys.path.insert(0, os.path.dirname(__file__))
-from intel_store import create_store
+from core.intel_store import create_store
 
 app = FastAPI(
     title="Kitsune Threat Intel API",

@@ -5,7 +5,7 @@ Configuration settings for the Threat Detection Agent
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Any
-from models import LLMProvider
+from .models import LLMProvider
 
 
 class LLMConfig:

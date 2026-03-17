@@ -8,7 +8,7 @@ import hashlib
 from typing import TYPE_CHECKING, Dict, List, Optional, Literal
 
 if TYPE_CHECKING:
-    from intel_store import ThreatIntelStore
+    from .intel_store import ThreatIntelStore
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -20,7 +20,7 @@ from langchain.output_parsers import OutputFixingParser
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from models import (
+from .models import (
     ThreatIntelligence,
     DetectionRule,
     AgentState,
@@ -28,23 +28,23 @@ from models import (
     RulesBundle,
     CoverageGap,
 )
-from config import Settings
-from llm_factory import LLMFactory
-from utils import (
+from .config import Settings
+from .llm_factory import LLMFactory
+from .utils import (
     extract_json_from_text,
     fix_json_formatting,
     sanitize_rule_content,
     determine_author,
     safe_filename,
 )
-from prompts import (
+from .prompts import (
     THREAT_INTEL_EXTRACTION_PROMPT,
     SPL_GENERATION_PROMPT,
     SIGMA_GENERATION_PROMPT,
     JSON_FORMAT_INSTRUCTIONS_ANTHROPIC,
 )
-from ioc_parser import validate_and_enrich_iocs, validate_ttps
-from coverage import analyze_gaps
+from .ioc_parser import validate_and_enrich_iocs, validate_ttps
+from .coverage import analyze_gaps
 
 
 class ThreatDetectionAgent:

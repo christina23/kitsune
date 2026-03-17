@@ -8,8 +8,8 @@ data sources.
 
 from typing import Dict, List
 
-from ioc_parser import Technique
-from models import DetectionRule, CoverageGap
+from .ioc_parser import Technique
+from .models import DetectionRule, CoverageGap
 
 # Maps top-level technique IDs to the log sources most likely to detect them
 TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {

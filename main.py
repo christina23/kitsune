@@ -10,11 +10,11 @@ from typing import List, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
-from agent import ThreatDetectionAgent
-from config import RedisConfig, Settings
-from intel_store import ThreatIntelStore, create_store
-from enrichment import enrich_rule, get_coverage_trends
-from utils import parse_providers_from_env, safe_filename
+from core.agent import ThreatDetectionAgent
+from core.config import RedisConfig, Settings
+from core.intel_store import ThreatIntelStore, create_store
+from core.enrichment import enrich_rule, get_coverage_trends
+from core.utils import parse_providers_from_env, safe_filename
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,7 +122,7 @@ def run_query_mode(
             print(f"[error] Rule '{args.rule_name}' not found in store.")
             sys.exit(1)
         import json
-        from models import DetectionRule
+        from core.models import DetectionRule
 
         rule = DetectionRule(
             name=match["name"],

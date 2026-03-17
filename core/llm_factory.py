@@ -8,8 +8,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
-from models import LLMProvider
-from config import LLMConfig
+from .models import LLMProvider
+from .config import LLMConfig
 
 
 class LLMFactory:
