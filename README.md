@@ -13,6 +13,28 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 - **Author Attribution**: Automatically attributes rules based on the source
 - **Error Recovery**: Fallback mechanisms ensure you always get usable output
 
+## Web Interfaces
+
+Kitsune includes a search UI and REST API for querying the Redis store interactively.
+
+| Interface | URL | Description |
+|-----------|-----|-------------|
+| **Search UI** | `http://localhost:8501` | Streamlit app — search IOCs, rules, actors, trends, and coverage. API doc links are in the collapsible left sidebar. |
+| **Scalar API Docs** | `http://localhost:8000/scalar` | Interactive API reference with Python `requests` code examples and built-in dark/light mode. |
+| **Swagger UI** | `http://localhost:8000/docs` | Classic Swagger UI with dark mode toggle and try-it-out support. |
+
+### Running the interfaces
+
+```bash
+# Terminal 1 — REST API (required by the UI)
+uvicorn api:app --reload --port 8000
+
+# Terminal 2 — Search UI
+streamlit run app.py
+```
+
+> **Note:** Set `REDIS_URL` in your `.env` (e.g. `REDIS_URL=redis://localhost:6379`) before starting the API, otherwise query endpoints will return 503.
+
 ## Project Structure
 
 ```
@@ -26,6 +48,8 @@ kitsune/
 ├── llm_factory.py    # LLM provider factory
 ├── utils.py          # Utility functions
 ├── prompts.py        # Prompt templates
+├── api.py            # FastAPI REST API (Scalar + Swagger docs)
+├── app.py            # Streamlit search UI
 ├── pyproject.toml    # Python dependencies (for poetry)
 ├── poetry.lock       # Poetry lock file
 ├── .env              # Environment variables

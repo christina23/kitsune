@@ -33,7 +33,8 @@ app = FastAPI(
     ),
     version="0.2.0",
     contact={"name": "Kitsune", "url": "https://github.com/christina23/kitsune"},
-    docs_url=None,  # disable default; we serve a custom page below
+    docs_url=None,   # disabled; custom Swagger served at /docs
+    redoc_url=None,  # disabled; Scalar served at /scalar
 )
 
 app.add_middleware(
@@ -215,6 +216,33 @@ async def custom_swagger_ui() -> HTMLResponse:
     # Inject dark-mode CSS and toggle JS just before </body>
     injection = f"<style>{_DARK_CSS}</style><script>{_TOGGLE_JS}</script>"
     html = html.replace("</body>", injection + "</body>")
+    return HTMLResponse(html)
+
+
+@app.get("/scalar", include_in_schema=False)
+async def scalar_ui() -> HTMLResponse:
+    fox_favicon = (
+        "data:image/svg+xml,"
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+        "<text y='.9em' font-size='90'>🦊</text></svg>"
+    )
+    html = f"""<!doctype html>
+<html>
+  <head>
+    <title>{app.title} — API Reference</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="{fox_favicon}">
+  </head>
+  <body>
+    <script
+      id="api-reference"
+      data-url="{app.openapi_url}"
+      data-configuration='{{"theme": "moon", "defaultHttpClient": {{"targetKey": "python", "clientKey": "requests"}}}}'
+    ></script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  </body>
+</html>"""
     return HTMLResponse(html)
 
 

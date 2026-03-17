@@ -37,7 +37,7 @@ with header_right:
     st.markdown(
         f"""
         <div style="text-align:right; padding-top:1.4rem;">
-            <a href="{API_URL}/docs" target="_blank"
+            <a href="{API_URL}/scalar" target="_blank"
                style="background:#ff4b4b; color:white; padding:0.45rem 1rem;
                       border-radius:6px; text-decoration:none; font-weight:600;
                       font-size:0.9rem;">
@@ -110,15 +110,36 @@ def _actor_badge(actor: str) -> str:
     return _badge(actor, "#6b3fa0")
 
 
-# ── Redis health indicator in sidebar ────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
+st.sidebar.title("🦊 Kitsune")
+
+st.sidebar.markdown("### 📚 API Docs")
+st.sidebar.markdown(
+    f"""
+<a href="{API_URL}/scalar" target="_blank"
+   style="display:block; background:#1a3a5c; color:#a8c8e8; padding:0.5rem 0.85rem;
+          border-radius:6px; text-decoration:none; font-weight:600; margin-bottom:6px;">
+  ✦ Scalar API Reference
+</a>
+<a href="{API_URL}/docs" target="_blank"
+   style="display:block; background:#1c2128; color:#adbac7; padding:0.5rem 0.85rem;
+          border-radius:6px; text-decoration:none; font-weight:500;">
+  ⚡ Swagger UI
+</a>
+""",
+    unsafe_allow_html=True,
+)
+
+st.sidebar.divider()
+st.sidebar.markdown("### ⚙️ Status")
 health = _get("/")
 if health:
     redis_ok = health.get("redis") == "connected"
     st.sidebar.markdown(
         f"**Redis:** {'🟢 Connected' if redis_ok else '🔴 Unavailable'}"
     )
-    st.sidebar.markdown(f"**API:** {API_URL}")
+st.sidebar.markdown(f"**API:** `{API_URL}`")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
