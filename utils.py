@@ -32,7 +32,9 @@ def parse_providers_from_env() -> List[str]:
 
 def safe_filename(name: str) -> str:
     """Create a safe filename from a rule name"""
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "rule").strip())[:Settings.MAX_FILENAME_LENGTH]
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "rule").strip())[
+        : Settings.MAX_FILENAME_LENGTH
+    ]
     return base or "rule"
 
 
@@ -57,7 +59,7 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
         pass
 
     # Try to extract from markdown code blocks
-    json_pattern = r'```(?:json)?\s*(.*?)\s*```'
+    json_pattern = r"```(?:json)?\s*(.*?)\s*```"
     json_match = re.search(json_pattern, text, re.DOTALL | re.IGNORECASE)
     if json_match:
         try:
@@ -69,54 +71,54 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
     brace_count = 0
     start_idx = -1
     end_idx = -1
-    
+
     for i, char in enumerate(text):
-        if char == '{' and start_idx == -1:
+        if char == "{" and start_idx == -1:
             start_idx = i
             brace_count = 1
         elif start_idx != -1:
-            if char == '{':
+            if char == "{":
                 brace_count += 1
-            elif char == '}':
+            elif char == "}":
                 brace_count -= 1
                 if brace_count == 0:
                     end_idx = i + 1
                     break
-    
+
     if start_idx != -1 and end_idx != -1:
         json_str = text[start_idx:end_idx]
-        
+
         # Clean up common JSON issues
         json_str = fix_json_formatting(json_str)
-        
+
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
             print(f"JSON decode error after cleanup: {e}")
             print(f"Attempted to parse: {json_str[:200]}...")
-    
+
     raise ValueError(f"Could not extract valid JSON from response")
 
 
 def fix_json_formatting(json_str: str) -> str:
     """Fix common JSON formatting issues"""
     # Remove trailing commas
-    json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
-    
+    json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+
     # Fix missing commas between elements
     json_str = re.sub(r'"\s*\n\s*"', '",\n"', json_str)
-    json_str = re.sub(r'}\s*\n\s*{', '},\n{', json_str)
+    json_str = re.sub(r"}\s*\n\s*{", "},\n{", json_str)
     json_str = re.sub(r']\s*\n\s*"', '],\n"', json_str)
-    json_str = re.sub(r'}\s*{', '},{', json_str)
-    json_str = re.sub(r']\s*\[', '],[', json_str)
-    
+    json_str = re.sub(r"}\s*{", "},{", json_str)
+    json_str = re.sub(r"]\s*\[", "],[", json_str)
+
     # Fix escaped characters that might cause issues
     json_str = json_str.replace('\\"', '"')
-    json_str = re.sub(r'\\{2,}', r'\\', json_str)
-    
+    json_str = re.sub(r"\\{2,}", r"\\", json_str)
+
     # Remove any BOM or zero-width characters
-    json_str = json_str.encode('utf-8', 'ignore').decode('utf-8-sig')
-    
+    json_str = json_str.encode("utf-8", "ignore").decode("utf-8-sig")
+
     return json_str
 
 

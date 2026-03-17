@@ -5,16 +5,23 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 ## Features
 
 - **Multi-LLM Support**: Works with Anthropic Claude, OpenAI GPT, and Perplexity models
-- **Multiple Rule Formats**: Generates Splunk SPL or Sigma detection rules (or both)
-- **Artifact Extraction**: Extracts threat actors, IOCs, MITRE TTPs, and behaviors from reports
+- **Multiple Rule Formats**: Generates both Splunk SPL and Sigma detection rules
+- **Robust JSON Handling**: Special handling for Anthropic's response format with automatic fixing
+- **Validated IOC Extraction**: Regex-based extraction and validation for IPs, domains, hashes, URLs, and file names — merges LLM output with regex findings and deduplicates
+- **Validated TTP Extraction**: MITRE ATT&CK technique IDs are validated against regex patterns, confidence-scored (1.0 if found verbatim in text, 0.85 if LLM-only, 0.7 if regex-only), and deduplicated; sub-techniques preferred over parent IDs
+- **Coverage Gap Analysis**: After rule generation, compares extracted techniques against the generated rules and reports which TTPs have no detection coverage, with priority (high/medium/low) and recommended data sources
+- **Author Attribution**: Automatically attributes rules based on the source
+- **Error Recovery**: Fallback mechanisms ensure you always get usable output
 
 ## Project Structure
 
 ```
 kitsune/
 ├── main.py           # Main entry point
-├── agent.py          # Core ThreatDetectionAgent class
-├── models.py         # Pydantic data models
+├── agent.py          # Core ThreatDetectionAgent class (LangGraph workflow)
+├── models.py         # Pydantic data models (ThreatIntelligence, DetectionRule, CoverageGap, AgentState)
+├── ioc_parser.py     # Regex IOC + TTP extraction, validation, and confidence scoring
+├── coverage.py       # Coverage gap analysis (techniques vs generated rules)
 ├── config.py         # Configuration settings
 ├── llm_factory.py    # LLM provider factory
 ├── utils.py          # Utility functions
@@ -162,14 +169,11 @@ This will:
 ```python
 from agent import ThreatDetectionAgent
 
-# Create agent with specific provider
 agent = ThreatDetectionAgent(llm_provider="anthropic")
 
-# Generate detection rules
 url = "https://example.com/threat-report"
 rules = agent.generate_detections(url, rule_format="spl")
 
-# Process rules
 for rule in rules:
     print(f"Rule: {rule.name}")
     print(f"Author: {rule.author}")
@@ -182,7 +186,6 @@ for rule in rules:
 ```python
 from agent import ThreatDetectionAgent
 
-# Custom API keys and settings
 agent = ThreatDetectionAgent(
     llm_provider="openai",
     llm_model="gpt-4",

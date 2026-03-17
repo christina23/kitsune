@@ -1,0 +1,6 @@
+.env
+__pycache__/
+output/
+output_fun/
+output_fun_sigma/
+output.zip
