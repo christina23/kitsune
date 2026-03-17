@@ -89,6 +89,7 @@ streamlit run app.py                   # Terminal 2
 | `RULE_FORMAT` | Output format: `spl`, `sigma`, or `both` | — |
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `REDIS_KEY_PREFIX` | Namespace prefix for Redis keys | `kitsune` |
+| `USER_AGENT` | HTTP User-Agent for fetching intel URLs | `kitsune/1.0` |
 
 ## Usage
 
