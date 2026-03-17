@@ -3,6 +3,7 @@ Configuration settings for the Threat Detection Agent
 """
 
 import os
+from dataclasses import dataclass, field
 from typing import Dict, Any
 from models import LLMProvider
 
@@ -66,3 +67,20 @@ class Settings:
 
     # Content safety
     FORBIDDEN_TERMS = ["disable logging", "delete", "shutdown", "format disk"]
+
+
+@dataclass
+class RedisConfig:
+    """Redis connection configuration for the optional threat intel store."""
+
+    url: str = field(
+        default_factory=lambda: os.getenv(
+            "REDIS_URL", "redis://localhost:6379"
+        )
+    )
+    key_prefix: str = field(
+        default_factory=lambda: os.getenv("REDIS_KEY_PREFIX", "kitsune")
+    )
+    enabled: bool = field(
+        default_factory=lambda: bool(os.getenv("REDIS_URL"))
+    )

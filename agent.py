@@ -5,7 +5,10 @@ Core Threat Detection Agent implementation
 import os
 import time
 import hashlib
-from typing import Dict, List, Optional, Literal
+from typing import TYPE_CHECKING, Dict, List, Optional, Literal
+
+if TYPE_CHECKING:
+    from intel_store import ThreatIntelStore
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -55,8 +58,10 @@ class ThreatDetectionAgent:
         llm_model: Optional[str] = None,
         temperature: float = 0,
         api_keys: Optional[Dict[str, str]] = None,
+        store: Optional["ThreatIntelStore"] = None,
         **llm_kwargs,
     ):
+        self.store = store
         self.llm_provider = llm_provider or os.getenv("LLM_PROVIDER", "openai")
         self.llm_factory = LLMFactory(
             default_provider=self.llm_provider, api_keys=api_keys
@@ -261,6 +266,16 @@ class ThreatDetectionAgent:
                 f"({ioc_count} IOCs, {ttp_count} TTPs)"
             )
 
+            if self.store:
+                try:
+                    self.store.ingest_threat_intel(
+                        threat_intel, source_url=state["url"]
+                    )
+                except Exception as store_err:
+                    print(
+                        f"[store] Ingest failed (non-fatal): {store_err}"
+                    )
+
         except Exception as e:
             print(f"Threat intel extraction failed: {str(e)}")
             state["error"] = f"Failed to extract threat intelligence: {str(e)}"
@@ -372,6 +387,23 @@ class ThreatDetectionAgent:
             )
             print(f"Generated {len(state['detection_rules'])} SPL rules")
 
+            if self.store and state.get("detection_rules"):
+                actor = (
+                    (state["threat_intel"].threat_actor or "")
+                    if state.get("threat_intel")
+                    else ""
+                )
+                try:
+                    self.store.ingest_rules(
+                        state["detection_rules"],
+                        source_url=state["url"],
+                        threat_actor=actor,
+                    )
+                except Exception as store_err:
+                    print(
+                        f"[store] Rule ingest failed (non-fatal): {store_err}"
+                    )
+
         except Exception as e:
             print(f"SPL rule generation failed: {str(e)}")
             state["error"] = f"Failed to generate SPL rules: {str(e)}"
@@ -433,6 +465,23 @@ class ThreatDetectionAgent:
                 author=author,
             )
             print(f"Generated {len(state['detection_rules'])} Sigma rules")
+
+            if self.store and state.get("detection_rules"):
+                actor = (
+                    (state["threat_intel"].threat_actor or "")
+                    if state.get("threat_intel")
+                    else ""
+                )
+                try:
+                    self.store.ingest_rules(
+                        state["detection_rules"],
+                        source_url=state["url"],
+                        threat_actor=actor,
+                    )
+                except Exception as store_err:
+                    print(
+                        f"[store] Rule ingest failed (non-fatal): {store_err}"
+                    )
 
         except Exception as e:
             print(f"Sigma rule generation failed: {str(e)}")
