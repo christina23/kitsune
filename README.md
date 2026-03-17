@@ -4,7 +4,7 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 
 ## Features
 
-- **Multi-LLM Support**: Works with Anthropic Claude, OpenAI GPT, and Perplexity models
+- **Multi-LLM Support**: Works with Anthropic Claude and OpenAI GPT models
 - **Multiple Rule Formats**: Generates both Splunk SPL and Sigma detection rules
 - **Robust JSON Handling**: Special handling for Anthropic's response format with automatic fixing
 - **Validated IOC Extraction**: Regex-based extraction and validation for IPs, domains, hashes, URLs, and file names — merges LLM output with regex findings and deduplicates
@@ -31,8 +31,7 @@ kitsune/
 ├── .env              # Environment variables
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
-    ├── openai/
-    └── perplexity/
+    └── openai/
 ```
 
 ## Installation
@@ -61,10 +60,11 @@ source .env
 
 ### Environment Variables
 
-- `LLM_PROVIDERS`: Comma-separated list of providers (e.g., "anthropic,openai,perplexity")
+- `LLM_PROVIDERS`: Comma-separated list of providers (e.g., "anthropic,openai")
 - `ANTHROPIC_API_KEY`: Your Anthropic API key
 - `OPENAI_API_KEY`: Your OpenAI API key
-- `PERPLEXITY_API_KEY`: Your Perplexity API key
+- `ANTHROPIC_MODEL`: Anthropic model to use (default: `claude-sonnet-4-6`)
+- `OPENAI_MODEL`: OpenAI model to use (default: `gpt-4o-mini`)
 - `INTEL_URL`: URL of the threat intelligence report to process
 - `RULE_FORMAT`: Output format - "spl", "sigma", or "both"
 
@@ -75,7 +75,7 @@ LLM_PROVIDERS=anthropic,openai
 ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...
 INTEL_URL=https://example.com/threat-report
-RULE_FORMAT=spl
+RULE_FORMAT=sigma
 ```
 
 ## Quick Start
@@ -97,17 +97,17 @@ Upon running `main.py`, you should see this output upon successful run (takes a 
 ============================================================
 THREAT DETECTION AGENT
 ============================================================
-Using providers: anthropic, openai, perplexity
+Using providers: anthropic, openai
 Processing URL: https://cloud.google.com/blog/topics/threat-intelligence/data-theft-salesforce-instances-via-salesloft-drift
-Rule formats: spl
+Rule formats: sigma
 ============================================================
 Generating rules with provider: ANTHROPIC
 ============================================================
-[ANTHROPIC] Generating SPL rules...
+[ANTHROPIC] Generating Sigma rules...
 Fetched 10606 characters from URL
 Extracted threat intel for: UNC6395
-Generated 6 SPL rules
-[ANTHROPIC] Wrote 6 SPL rule file(s) to output/anthropic:
+Generated 6 Sigma rules
+[ANTHROPIC] Wrote 6 Sigma rule file(s) to output/anthropic:
   - UNC6395_OAuth_Token_Abuse_Salesforce_Detection.txt
   - UNC6395_Bulk_Data_Export_Salesforce_Detection.txt
   - UNC6395_Credential_Harvesting_Search_Detection.txt
@@ -117,31 +117,17 @@ Generated 6 SPL rules
 ============================================================
 Generating rules with provider: OPENAI
 ============================================================
-[OPENAI] Generating SPL rules...
+[OPENAI] Generating Sigma rules...
 Fetched 10606 characters from URL
 Extracted threat intel for: UNC6395
-Generated 6 SPL rules
-[OPENAI] Wrote 6 SPL rule file(s) to output/openai:
+Generated 6 Sigma rules
+[OPENAI] Wrote 6 Sigma rule file(s) to output/openai:
   - UNC6395_Data_Exfiltration_Salesforce_Detection.txt
   - UNC6395_OAuth_Token_Abuse_Salesforce_Detection.txt
   - UNC6395_Credential_Access_Cloud_Detection.txt
   - UNC6395_Sensitive_Data_Search_Salesforce_Detection.txt
   - UNC6395_Anomalous_User_Activity_Salesforce_Detection.txt
   - UNC6395_Excessive_API_Calls_Salesforce_Detection.txt
-============================================================
-Generating rules with provider: PERPLEXITY
-============================================================
-[PERPLEXITY] Generating SPL rules...
-Fetched 10606 characters from URL
-Extracted threat intel for: UNC6395
-Generated 6 SPL rules
-[PERPLEXITY] Wrote 6 SPL rule file(s) to output/perplexity:
-  - UNC6395_Abnormal_Bulk_Export_Salesforce_Detection.txt
-  - UNC6395_New_OAuth_Application_Salesforce_Detection.txt
-  - UNC6395_Deleted_Job_Logs_Salesforce_Detection.txt
-  - UNC6395_Tor_Cloud_Proxy_Access_Salesforce_Detection.txt
-  - UNC6395_Secrets_Search_Exfiltrated_Data_Detection.txt
-  - UNC6395_Anomalous_SOQL_Usage_Salesforce_Detection.txt
 ============================================================
 RULE GENERATION COMPLETE!
 ============================================================
@@ -203,8 +189,8 @@ output/
 ├── anthropic/
 │   ├── UNC6395_Data_Exfiltration_Detection.txt
 │   └── UNC6395_Credential_Harvesting_Detection.txt
-├── openai/
-│   └── ...
+└── openai/
+    └── ...
 ```
 
 Each rule file contains:
@@ -230,7 +216,6 @@ The agent includes multiple layers of error handling:
 class LLMProvider(Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
-    PERPLEXITY = "perplexity"
     NEWPROVIDER = "newprovider"  # Add your provider
 ```
 
