@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["run", "query", "trends", "actor-summary", "enrich-rule"],
+        choices=["run", "query", "trends", "actor-summary", "enrich-rule", "flush"],
         default="run",
         help="Operation mode (default: run)",
     )
@@ -71,6 +71,12 @@ def run_query_mode(
     args: argparse.Namespace, store: Optional[ThreatIntelStore]
 ) -> None:
     """Handle non-pipeline query modes."""
+    if args.mode == "flush":
+        _require_store(store, "flush")
+        deleted = store.flush()
+        print(f"[flush] Deleted {deleted} key(s) from the store.")
+        return
+
     if args.mode == "trends":
         _require_store(store, "trends")
         print(get_coverage_trends(store, top_n=args.top))
