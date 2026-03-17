@@ -10,11 +10,11 @@ from typing import List, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
-from agent import ThreatDetectionAgent
-from config import RedisConfig, Settings
-from intel_store import ThreatIntelStore, create_store
-from enrichment import enrich_rule, get_coverage_trends
-from utils import parse_providers_from_env, safe_filename
+from core.agent import ThreatDetectionAgent
+from core.config import RedisConfig, Settings
+from core.intel_store import ThreatIntelStore, create_store
+from core.enrichment import enrich_rule, get_coverage_trends
+from core.utils import parse_providers_from_env, safe_filename
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["run", "query", "trends", "actor-summary", "enrich-rule"],
+        choices=["run", "query", "trends", "actor-summary", "enrich-rule", "flush"],
         default="run",
         help="Operation mode (default: run)",
     )
@@ -71,6 +71,12 @@ def run_query_mode(
     args: argparse.Namespace, store: Optional[ThreatIntelStore]
 ) -> None:
     """Handle non-pipeline query modes."""
+    if args.mode == "flush":
+        _require_store(store, "flush")
+        deleted = store.flush()
+        print(f"[flush] Deleted {deleted} key(s) from the store.")
+        return
+
     if args.mode == "trends":
         _require_store(store, "trends")
         print(get_coverage_trends(store, top_n=args.top))
@@ -122,7 +128,7 @@ def run_query_mode(
             print(f"[error] Rule '{args.rule_name}' not found in store.")
             sys.exit(1)
         import json
-        from models import DetectionRule
+        from core.models import DetectionRule
 
         rule = DetectionRule(
             name=match["name"],

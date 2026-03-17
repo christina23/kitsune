@@ -12,7 +12,7 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
-from models import DetectionRule, ThreatIntelligence
+from .models import DetectionRule, ThreatIntelligence
 
 
 def _slug(name: str) -> str:
@@ -86,6 +86,10 @@ class ThreatIntelStore(ABC):
     def get_actor_summary(self, actor_name: str) -> Dict:
         """Return IOC counts by type, TTPs, and campaigns for an actor."""
 
+    @abstractmethod
+    def flush(self) -> int:
+        """Delete all keys belonging to this store's prefix. Returns count of deleted keys."""
+
 
 # ── Redis implementation ──────────────────────────────────────────────────────
 
@@ -130,6 +134,9 @@ class RedisIntelStore(ThreatIntelStore):
 
     def _lookup_key(self, value: str) -> str:
         return f"{self._p}:lookup:{_sha(value.lower())}"
+
+    def _src_rules_key(self, url: str) -> str:
+        return f"{self._p}:src:{_sha(url)}:rules"
 
     # ── Ingestion ─────────────────────────────────────────────────────────────
 
@@ -203,6 +210,25 @@ class RedisIntelStore(ThreatIntelStore):
         source_url: str,
         threat_actor: str,
     ) -> None:
+        src_key = self._src_rules_key(source_url)
+
+        # Remove stale rules from a previous run of this same URL
+        old_rule_keys = self._r.smembers(src_key)
+        if old_rule_keys:
+            pipe = self._r.pipeline()
+            for old_key in old_rule_keys:
+                old_data = self._r.hgetall(old_key)
+                if old_data:
+                    old_actor = old_data.get("threat_actor", "")
+                    old_ttps = json.loads(old_data.get("ttps", "[]"))
+                    if old_actor:
+                        pipe.srem(self._actor_rule_idx(old_actor), old_key)
+                    for ttp_id in old_ttps:
+                        pipe.srem(self._ttp_rule_idx(ttp_id), old_key)
+                pipe.delete(old_key)
+            pipe.delete(src_key)
+            pipe.execute()
+
         for rule in rules:
             key = self._rule_key(rule.name, rule.rule_content)
             self._r.hset(
@@ -221,6 +247,7 @@ class RedisIntelStore(ThreatIntelStore):
                 pipe.sadd(self._actor_rule_idx(threat_actor), key)
             for ttp_id in rule.mitre_ttps:
                 pipe.sadd(self._ttp_rule_idx(ttp_id), key)
+            pipe.sadd(src_key, key)
             pipe.execute()
 
     # ── Querying ──────────────────────────────────────────────────────────────
@@ -309,6 +336,12 @@ class RedisIntelStore(ThreatIntelStore):
             self._trend_key(), 0, n - 1, withscores=True
         )
         return [{"ttp_id": ttp, "count": int(score)} for ttp, score in entries]
+
+    def flush(self) -> int:
+        keys = list(self._r.scan_iter(f"{self._p}:*"))
+        if keys:
+            self._r.delete(*keys)
+        return len(keys)
 
     def get_actor_summary(self, actor_name: str) -> Dict:
         ioc_keys = self._r.smembers(self._actor_ioc_idx(actor_name))

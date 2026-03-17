@@ -6,8 +6,8 @@ threat actor, tradecraft, and TTP context from the intel store.
 import json
 from typing import Any, Dict, List
 
-from intel_store import ThreatIntelStore
-from models import DetectionRule
+from .intel_store import ThreatIntelStore
+from .models import DetectionRule
 
 
 def enrich_rule(rule: DetectionRule, store: ThreatIntelStore) -> Dict:

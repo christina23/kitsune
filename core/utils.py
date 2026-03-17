@@ -6,7 +6,7 @@ import os
 import re
 import json
 from typing import List, Dict, Any
-from config import Settings, AuthorMapping
+from .config import Settings, AuthorMapping
 
 
 def parse_providers_from_env() -> List[str]:
