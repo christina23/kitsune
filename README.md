@@ -53,15 +53,53 @@ kitsune/
 ├── prompts.py        # Prompt templates
 ├── api.py            # FastAPI REST API (Scalar + Swagger docs)
 ├── app.py            # Streamlit search UI
-├── pyproject.toml    # Python dependencies (for poetry)
-├── poetry.lock       # Poetry lock file
-├── .env              # Environment variables
+├── Dockerfile        # Container image definition
+├── docker-compose.yml# Orchestrates Redis, API, and UI services
+├── requirements.txt  # Pinned Python dependencies
+├── pyproject.toml    # Python project metadata
+├── .env              # Environment variables (copy from .env.copy)
 └── output/           # Generated detection rules (created by running `main.py`)
     ├── anthropic/
     └── openai/
 ```
 
 ## Installation
+
+### Docker (recommended)
+
+The easiest way to run Kitsune — no Python environment needed.
+
+1. **Clone the repository**:
+```bash
+git clone <repository-url>
+cd kitsune
+```
+
+2. **Configure environment variables**:
+```bash
+cp .env.copy .env
+# Edit .env — add your ANTHROPIC_API_KEY and/or OPENAI_API_KEY
+```
+
+3. **Build and start all services**:
+```bash
+docker compose up --build
+```
+
+That's it. Services start in order (Redis → API → UI):
+
+| Service | URL |
+|---------|-----|
+| Search UI | http://localhost:8501 |
+| Scalar API Docs | http://localhost:8000/scalar |
+| Swagger UI | http://localhost:8000/docs |
+
+To stop: `docker compose down`
+To stop and wipe Redis data: `docker compose down -v`
+
+---
+
+### Local (manual)
 
 1. **Clone the repository**:
 ```bash
@@ -81,6 +119,20 @@ source ~/.venv/bin/activate
 cp .env.copy .env
 # Edit .env with your API keys
 source .env
+```
+
+4. **Start Redis** (if not already running):
+```bash
+docker run -d --name kitsune-redis -p 6379:6379 redis:alpine
+```
+
+5. **Start the API and UI** (two terminals):
+```bash
+# Terminal 1
+uvicorn api:app --reload --port 8000
+
+# Terminal 2
+streamlit run app.py
 ```
 
 ## Configuration
