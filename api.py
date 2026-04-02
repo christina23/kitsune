@@ -8,9 +8,12 @@ Swagger UI:  http://localhost:8000/docs
 Redoc:       http://localhost:8000/redoc
 """
 
+import json
 import os
 import sys
-from typing import Dict, List, Optional
+import threading
+import uuid
+from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
@@ -40,7 +43,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["*"],
 )
 
@@ -261,8 +264,10 @@ class IOCRecord(BaseModel):
 
 
 class RuleRecord(BaseModel):
+    rule_id: Optional[str] = None
     name: str
     format: str
+    rule_content: Optional[str] = None
     ttps: Optional[str] = None  # JSON-encoded list
     threat_actor: Optional[str] = None
     source_url: Optional[str] = None
@@ -294,6 +299,164 @@ class ActorSummary(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     redis: str
+
+
+# ── Pipeline models ───────────────────────────────────────────────────────────
+
+
+class AnalyzeRequest(BaseModel):
+    url: str
+    rule_format: Literal["sigma", "spl"] = "spl"
+    llm_provider: str = "anthropic"
+
+
+class IOCSummary(BaseModel):
+    ips: List[str] = []
+    domains: List[str] = []
+    hashes: List[str] = []
+    files: List[str] = []
+    urls: List[str] = []
+
+
+class CoverageGapResponse(BaseModel):
+    technique_id: str
+    tactic: str
+    priority: str
+    reason: str
+    data_sources: List[str]
+    fuzzy_match: bool = False
+    fuzzy_score: Optional[float] = None
+
+
+class FullRuleRecord(BaseModel):
+    rule_id: Optional[str] = None
+    name: str
+    format: str
+    rule_content: Optional[str] = None
+    ttps: Optional[str] = None
+    threat_actor: Optional[str] = None
+    source_url: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class AnalyzeResponse(BaseModel):
+    threat_actor: Optional[str] = None
+    campaign_name: Optional[str] = None
+    iocs: IOCSummary = IOCSummary()
+    rules: List[FullRuleRecord] = []
+    coverage_gaps: List[CoverageGapResponse] = []
+    error: Optional[str] = None
+
+
+class RuleUpdateRequest(BaseModel):
+    rule_content: str
+
+
+class AnalyzeStartResponse(BaseModel):
+    task_id: str
+    status: str = "running"
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: Literal["running", "done", "error"]
+    step: Optional[str] = None
+    result: Optional[AnalyzeResponse] = None
+    error: Optional[str] = None
+
+
+# ── In-memory task store ──────────────────────────────────────────────────────
+# Maps task_id → {"status", "step", "result", "error"}
+# Tasks are held for the lifetime of the server process.
+
+_tasks: Dict[str, Dict[str, Any]] = {}
+_tasks_lock = threading.Lock()
+
+
+def _set_task(task_id: str, **kwargs: Any) -> None:
+    with _tasks_lock:
+        _tasks[task_id].update(kwargs)
+
+
+def _run_pipeline_task(task_id: str, req: "AnalyzeRequest") -> None:
+    """Background thread: run the full pipeline and write results to _tasks."""
+    try:
+        _set_task(task_id, step="Loading store…")
+        store = create_store()
+
+        _set_task(task_id, step="Initialising agent…")
+        from core.agent import ThreatDetectionAgent
+
+        agent = ThreatDetectionAgent(llm_provider=req.llm_provider, store=store)
+
+        # The pipeline runs sequentially inside generate_detections.
+        # We update `step` at major milestones visible to the UI.
+        _set_task(task_id, step="Fetching & parsing URL…")
+
+        # Monkey-patch the agent's internal steps to surface progress
+        _orig_fetch = agent._fetch_content
+        _orig_extract = agent._extract_threat_intel
+        _orig_coverage = agent._analyze_coverage
+        _orig_spl = agent._generate_spl_rules
+        _orig_sigma = agent._generate_sigma_rules
+
+        def _traced(fn, label):
+            def _wrapper(state):
+                _set_task(task_id, step=label)
+                return fn(state)
+            return _wrapper
+
+        agent._fetch_content = _traced(_orig_fetch, "Fetching URL content…")
+        agent._extract_threat_intel = _traced(_orig_extract, "Extracting IOCs & TTPs…")
+        agent._analyze_coverage = _traced(_orig_coverage, "Phase 1 coverage analysis…")
+        agent._generate_spl_rules = _traced(_orig_spl, "Generating SPL rules…")
+        agent._generate_sigma_rules = _traced(_orig_sigma, "Generating Sigma rules…")
+        # Rebuild workflow with the patched methods
+        agent.workflow = agent._create_workflow()
+        from langgraph.checkpoint.memory import MemorySaver
+        agent.app = agent.workflow.compile(checkpointer=MemorySaver())
+
+        _set_task(task_id, step="Pipeline running…")
+        rules = agent.generate_detections(req.url, req.rule_format)
+
+        state = agent._last_state or {}
+        intel = state.get("threat_intel")
+        gaps = state.get("coverage_gaps", [])
+
+        iocs = IOCSummary(**(intel.iocs.to_dict() if intel and intel.iocs else {}))
+        rule_records = [
+            FullRuleRecord(
+                name=r.name,
+                format=r.format,
+                rule_content=r.rule_content,
+                ttps=json.dumps(r.mitre_ttps),
+                source_url=req.url,
+            )
+            for r in rules
+        ]
+        gap_records = [
+            CoverageGapResponse(
+                technique_id=g.technique_id,
+                tactic=g.tactic,
+                priority=g.priority,
+                reason=g.reason,
+                data_sources=g.data_sources,
+                fuzzy_match=g.fuzzy_match,
+                fuzzy_score=g.fuzzy_score,
+            )
+            for g in gaps
+        ]
+        result = AnalyzeResponse(
+            threat_actor=intel.threat_actor if intel else None,
+            campaign_name=intel.campaign_name if intel else None,
+            iocs=iocs,
+            rules=rule_records,
+            coverage_gaps=gap_records,
+        )
+        _set_task(task_id, status="done", step="Complete", result=result.model_dump())
+
+    except Exception as exc:
+        _set_task(task_id, status="error", step="Failed", error=str(exc))
 
 
 # ── Dependency ────────────────────────────────────────────────────────────────
@@ -409,3 +572,67 @@ def coverage_summary():
     store = get_store()
     raw = store.get_coverage_summary()
     return [{"ttp_id": ttp_id, **data} for ttp_id, data in sorted(raw.items())]
+
+
+@app.post("/analyze", response_model=AnalyzeStartResponse, tags=["Pipeline"])
+def analyze_url(req: AnalyzeRequest):
+    """
+    Start the Kitsune pipeline for a threat report URL and return immediately.
+
+    The pipeline runs in a background thread:
+    1. Fetch and parse page content
+    2. Extract IOCs and MITRE ATT&CK techniques
+    3. **Phase 1 coverage** — compare vs store rules with TLSH fuzzy matching
+    4. Generate detection rules targeting the identified gaps
+    5. **Phase 2 coverage** — update gaps to reflect newly generated rules
+
+    Returns a `task_id` immediately. Poll `GET /tasks/{task_id}` to get results.
+
+    **Example:** `POST /analyze` with body `{"url": "https://...", "rule_format": "spl"}`
+    """
+    task_id = uuid.uuid4().hex[:12]
+    with _tasks_lock:
+        _tasks[task_id] = {
+            "status": "running",
+            "step": "Queued",
+            "result": None,
+            "error": None,
+        }
+    thread = threading.Thread(
+        target=_run_pipeline_task, args=(task_id, req), daemon=True
+    )
+    thread.start()
+    return AnalyzeStartResponse(task_id=task_id)
+
+
+@app.get("/tasks/{task_id}", response_model=TaskStatusResponse, tags=["Pipeline"])
+def get_task_status(task_id: str):
+    """
+    Poll the status of a running pipeline task.
+
+    - `status: "running"` — pipeline is still executing; check `step` for current stage
+    - `status: "done"` — pipeline complete; `result` contains the full `AnalyzeResponse`
+    - `status: "error"` — pipeline failed; `error` contains the message
+
+    Poll every 3–5 seconds until status is `"done"` or `"error"`.
+    """
+    with _tasks_lock:
+        task = _tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+    return TaskStatusResponse(task_id=task_id, **task)
+
+
+@app.put("/rules/{rule_id:path}", tags=["Detection Rules"])
+def update_rule(rule_id: str, req: RuleUpdateRequest):
+    """
+    Update the `rule_content` for a stored detection rule.
+
+    Use the `rule_id` returned by `GET /rules` or `POST /analyze`.
+
+    **Example:** `PUT /rules/kitsune:rule:abc123` with body `{"rule_content": "..."}`
+    """
+    store = get_store()
+    if not store.update_rule(rule_id, req.rule_content):
+        raise HTTPException(status_code=404, detail=f"Rule '{rule_id}' not found.")
+    return {"status": "updated"}

@@ -26,6 +26,8 @@ class CoverageGap(BaseModel):
     reason: str
     data_sources: List[str]
     confidence: float
+    fuzzy_match: bool = False
+    fuzzy_score: Optional[float] = None
 
 
 class ThreatIntelligence(BaseModel):
@@ -80,3 +82,4 @@ class AgentState(TypedDict):
     coverage_gaps: List[CoverageGap]
     rule_format: Literal["sigma", "spl"]
     error: Optional[str]
+    _store_rules_cache: List[dict]

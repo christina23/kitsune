@@ -51,6 +51,7 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
     """
     Extract JSON from text that may contain additional content.
     Handles various edge cases and malformed responses.
+    Falls back to json-repair for LLM-generated JSON with unescaped quotes.
     """
     # First, try the most straightforward parsing
     try:
@@ -93,11 +94,29 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
 
         try:
             return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            print(f"JSON decode error after cleanup: {e}")
-            print(f"Attempted to parse: {json_str[:200]}...")
+        except json.JSONDecodeError:
+            pass
 
-    raise ValueError(f"Could not extract valid JSON from response")
+        # Fallback: use json-repair to handle unescaped quotes and other
+        # malformed LLM output (e.g. field="value" inside JSON strings)
+        try:
+            from json_repair import repair_json
+            repaired = repair_json(json_str, return_objects=True)
+            if isinstance(repaired, dict) and repaired:
+                return repaired
+        except Exception:
+            pass
+
+    # Last resort: attempt json-repair on the full text
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(text, return_objects=True)
+        if isinstance(repaired, dict) and repaired:
+            return repaired
+    except Exception:
+        pass
+
+    raise ValueError("Could not extract valid JSON from response")
 
 
 def fix_json_formatting(json_str: str) -> str:
@@ -111,10 +130,6 @@ def fix_json_formatting(json_str: str) -> str:
     json_str = re.sub(r']\s*\n\s*"', '],\n"', json_str)
     json_str = re.sub(r"}\s*{", "},{", json_str)
     json_str = re.sub(r"]\s*\[", "],[", json_str)
-
-    # Fix escaped characters that might cause issues
-    json_str = json_str.replace('\\"', '"')
-    json_str = re.sub(r"\\{2,}", r"\\", json_str)
 
     # Remove any BOM or zero-width characters
     json_str = json_str.encode("utf-8", "ignore").decode("utf-8-sig")

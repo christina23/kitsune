@@ -10,6 +10,7 @@ Requires the Kitsune API to be running at http://localhost:8000
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -64,6 +65,47 @@ def _get(endpoint: str, params: Optional[Dict] = None) -> Any:
             f"Cannot reach API at **{API_URL}**. "
             "Is `uvicorn api:app --port 8000` running?"
         )
+        return None
+    except requests.exceptions.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.response.json().get("detail", "")
+        except Exception:
+            pass
+        st.error(f"API error {e.response.status_code}: {detail or str(e)}")
+        return None
+
+
+def _post(endpoint: str, payload: Dict) -> Any:
+    """POST to the Kitsune API and return parsed JSON, or None on error."""
+    try:
+        resp = requests.post(f"{API_URL}{endpoint}", json=payload, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.ConnectionError:
+        st.error(
+            f"Cannot reach API at **{API_URL}**. "
+            "Is `uvicorn api:app --port 8000` running?"
+        )
+        return None
+    except requests.exceptions.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.response.json().get("detail", "")
+        except Exception:
+            pass
+        st.error(f"API error {e.response.status_code}: {detail or str(e)}")
+        return None
+
+
+def _put(endpoint: str, payload: Dict) -> Any:
+    """PUT to the Kitsune API and return parsed JSON, or None on error."""
+    try:
+        resp = requests.put(f"{API_URL}{endpoint}", json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.ConnectionError:
+        st.error(f"Cannot reach API at **{API_URL}**.")
         return None
     except requests.exceptions.HTTPError as e:
         detail = ""
@@ -143,9 +185,222 @@ st.sidebar.markdown(f"**API:** `{API_URL}`")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_ioc, tab_rules, tab_actors, tab_trends, tab_coverage = st.tabs(
-    ["🔍 IOC Search", "📋 Detection Rules", "👤 Actor Summary", "📈 Trends", "🗺️ Coverage"]
+tab_pipeline, tab_ioc, tab_rules, tab_actors, tab_trends, tab_coverage = st.tabs(
+    [
+        "🔬 Pipeline",
+        "🔍 IOC Search",
+        "📋 Detection Rules",
+        "👤 Actor Summary",
+        "📈 Trends",
+        "🗺️ Coverage",
+    ]
 )
+
+# ── Pipeline (pane-of-glass) ──────────────────────────────────────────────────
+
+with tab_pipeline:
+    st.subheader("Threat Intel Pipeline")
+    st.caption(
+        "Submit a threat report URL to extract IOCs, run coverage analysis "
+        "(Phase 1 vs store with TLSH fuzzy matching), then generate detection "
+        "rules and see what gaps remain (Phase 2)."
+    )
+
+    # ── Input ────────────────────────────────────────────────────────────────
+    pipeline_url = st.text_input(
+        "Threat Report URL",
+        placeholder="https://...",
+        key="pipeline_url",
+    )
+    col_fmt, col_llm, col_btn = st.columns([2, 2, 1])
+    with col_fmt:
+        pipeline_fmt = st.selectbox(
+            "Rule Format", ["spl", "sigma"], key="pipeline_fmt"
+        )
+    with col_llm:
+        pipeline_llm = st.selectbox(
+            "LLM Provider", ["anthropic", "openai"], key="pipeline_llm"
+        )
+    with col_btn:
+        st.write("")
+        st.write("")
+        run_pipeline = st.button("Analyze", type="primary", key="btn_pipeline")
+
+    if run_pipeline:
+        if not pipeline_url.strip():
+            st.warning("Please enter a URL.")
+        else:
+            resp = _post(
+                "/analyze",
+                {
+                    "url": pipeline_url.strip(),
+                    "rule_format": pipeline_fmt,
+                    "llm_provider": pipeline_llm,
+                },
+            )
+            if resp and resp.get("task_id"):
+                st.session_state["pipeline_task_id"] = resp["task_id"]
+                st.session_state["pipeline_result"] = None
+                st.rerun()
+
+    # ── Poll for task status ─────────────────────────────────────────────────
+    task_id = st.session_state.get("pipeline_task_id")
+    if task_id and not st.session_state.get("pipeline_result"):
+        task = _get(f"/tasks/{task_id}")
+        if task:
+            if task["status"] == "done":
+                st.session_state["pipeline_result"] = task.get("result", {})
+                st.session_state["pipeline_task_id"] = None
+                st.rerun()
+            elif task["status"] == "error":
+                st.error(f"Pipeline failed: {task.get('error', 'unknown error')}")
+                st.session_state["pipeline_task_id"] = None
+            else:
+                step = task.get("step", "Running…")
+                _STEPS = [
+                    "Fetching URL content…",
+                    "Extracting IOCs & TTPs…",
+                    "Phase 1 coverage analysis…",
+                    "Generating SPL rules…",
+                    "Generating Sigma rules…",
+                    "Complete",
+                ]
+                current = _STEPS.index(step) if step in _STEPS else 0
+                progress = min(current / max(len(_STEPS) - 1, 1), 0.95)
+                st.progress(progress, text=f"⏳ {step}")
+                time.sleep(3)
+                st.rerun()
+
+    # ── Results ──────────────────────────────────────────────────────────────
+    pipeline_result = st.session_state.get("pipeline_result")
+    if pipeline_result:
+        if pipeline_result.get("error"):
+            st.error(f"Pipeline error: {pipeline_result['error']}")
+        else:
+            # Threat Intel Summary
+            with st.expander("📥 Threat Intel Summary", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                c1.metric(
+                    "Threat Actor",
+                    pipeline_result.get("threat_actor") or "Unknown",
+                )
+                c2.metric(
+                    "Campaign",
+                    pipeline_result.get("campaign_name") or "—",
+                )
+                iocs_data = pipeline_result.get("iocs", {})
+                total_iocs = sum(
+                    len(v) for v in iocs_data.values() if isinstance(v, list)
+                )
+                c3.metric("Total IOCs", total_iocs)
+                ioc_counts = {
+                    k: len(v)
+                    for k, v in iocs_data.items()
+                    if isinstance(v, list) and v
+                }
+                if ioc_counts:
+                    st.bar_chart(ioc_counts)
+
+            # Extracted IOCs
+            with st.expander(
+                f"🔍 Extracted IOCs ({total_iocs})", expanded=False
+            ):
+                if total_iocs == 0:
+                    st.info("No IOCs extracted.")
+                else:
+                    for ioc_type, values in iocs_data.items():
+                        if values:
+                            st.markdown(
+                                f"**{ioc_type.upper()}** ({len(values)})"
+                            )
+                            st.dataframe(
+                                [{"value": v} for v in values],
+                                use_container_width=True,
+                            )
+
+            # Coverage Gaps (Phase 1 + Phase 2 results)
+            gaps = pipeline_result.get("coverage_gaps", [])
+            exact_gaps = [g for g in gaps if not g.get("fuzzy_match")]
+            fuzzy_gaps = [g for g in gaps if g.get("fuzzy_match")]
+            gap_label = f"🗺️ Coverage Gaps ({len(exact_gaps)} exact"
+            if fuzzy_gaps:
+                gap_label += f", {len(fuzzy_gaps)} fuzzy"
+            gap_label += ")"
+            with st.expander(gap_label, expanded=True):
+                if not gaps:
+                    st.success("All techniques have coverage after rule generation.")
+                else:
+                    rows = []
+                    for g in gaps:
+                        rows.append(
+                            {
+                                "TTP": g["technique_id"],
+                                "Tactic": g["tactic"],
+                                "Priority": g["priority"].upper(),
+                                "Fuzzy ~": "✓" if g.get("fuzzy_match") else "",
+                                "TLSH Dist": (
+                                    int(g["fuzzy_score"])
+                                    if g.get("fuzzy_score") is not None
+                                    else ""
+                                ),
+                                "Data Sources": ", ".join(
+                                    g.get("data_sources", [])[:2]
+                                ),
+                                "Reason": g.get("reason", ""),
+                            }
+                        )
+                    st.dataframe(rows, use_container_width=True)
+
+            # Generated Rules with inline editor
+            rules = pipeline_result.get("rules", [])
+            with st.expander(
+                f"📋 Generated Rules ({len(rules)})", expanded=True
+            ):
+                if not rules:
+                    st.info("No rules generated.")
+                else:
+                    for i, rule in enumerate(rules):
+                        rule_label = (
+                            f"[{rule.get('format', '').upper()}] "
+                            f"{rule.get('name', f'Rule {i + 1}')}"
+                        )
+                        with st.expander(rule_label, expanded=False):
+                            ttp_list = _parse_json_list(rule.get("ttps"))
+                            if ttp_list:
+                                st.markdown(
+                                    "**TTPs:** "
+                                    + " ".join(_ttp_badge(t) for t in ttp_list),
+                                    unsafe_allow_html=True,
+                                )
+                            edited_content = st.text_area(
+                                "Rule Content",
+                                value=rule.get("rule_content", ""),
+                                height=260,
+                                key=f"rule_edit_{i}",
+                            )
+                            save_col, status_col = st.columns([1, 4])
+                            with save_col:
+                                save_clicked = st.button(
+                                    "💾 Save", key=f"save_rule_{i}"
+                                )
+                            if save_clicked:
+                                rule_id = rule.get("rule_id")
+                                if rule_id:
+                                    resp = _put(
+                                        f"/rules/{rule_id}",
+                                        {"rule_content": edited_content},
+                                    )
+                                    with status_col:
+                                        if resp:
+                                            st.success("Saved to store.")
+                                        else:
+                                            st.error("Save failed.")
+                                else:
+                                    with status_col:
+                                        st.warning(
+                                            "Rule has no store ID — run the pipeline "
+                                            "with Redis connected to persist rules."
+                                        )
 
 # ── IOC Search ────────────────────────────────────────────────────────────────
 
