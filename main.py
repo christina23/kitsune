@@ -222,7 +222,7 @@ def main():
         "data-theft-salesforce-instances-via-salesloft-drift",
     )
 
-    rule_format_env = (os.getenv("RULE_FORMAT", "spl")).lower()
+    rule_format_env = (os.getenv("RULE_FORMAT", "sigma")).lower()
     rule_formats = ["spl", "sigma"] if rule_format_env == "both" else [
         rule_format_env
     ]

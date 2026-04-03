@@ -18,13 +18,13 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 |-----------|-----|-------------|
 | Search UI | `http://localhost:8501` | Streamlit app — search IOCs, rules, actors, trends, and coverage |
 | Scalar API Docs | `http://localhost:8000/scalar` | Interactive API reference with Python code examples |
-| Swagger UI | `http://localhost:8000/docs` | Classic Swagger UI with try-it-out support |
+| Swagger UI | `http://localhost:8000/docs` | Swagger UI with dark-mode toggle and try-it-out support |
 
 ## Project Structure
 
 ```
 kitsune/
-├── main.py               # Main entry point
+├── main.py               # CLI entry point
 ├── api.py                # FastAPI REST API
 ├── app.py                # Streamlit search UI
 ├── core/                 # Core library package
@@ -39,6 +39,7 @@ kitsune/
 │   ├── prompts.py        # Prompt templates
 │   ├── intel_store.py    # Redis-backed threat intel store
 │   └── enrichment.py     # Rule and event enrichment helpers
+├── tests/                # Test suite
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
@@ -86,18 +87,47 @@ streamlit run app.py                   # Terminal 2
 | `ANTHROPIC_MODEL` | Anthropic model | `claude-sonnet-4-6` |
 | `OPENAI_MODEL` | OpenAI model | `gpt-4o-mini` |
 | `INTEL_URL` | Threat report URL to process | — |
-| `RULE_FORMAT` | Output format: `spl`, `sigma`, or `both` | — |
+| `RULE_FORMAT` | Output format: `spl`, `sigma`, or `both` | `sigma` |
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `REDIS_KEY_PREFIX` | Namespace prefix for Redis keys | `kitsune` |
 | `USER_AGENT` | HTTP User-Agent for fetching intel URLs | `kitsune/1.0` |
 
 ## Usage
 
+### Run the pipeline
+
 ```bash
 python main.py
 ```
 
 Processes `INTEL_URL`, generates rules via all configured `LLM_PROVIDERS` in `RULE_FORMAT`, and saves output to `output/<provider>/`.
+
+### CLI Modes
+
+`main.py` accepts a `--mode` flag for additional operations (all store-backed modes require Redis):
+
+| Mode | Description | Required flags |
+|------|-------------|----------------|
+| `run` | Generate detection rules from `INTEL_URL` (default) | — |
+| `query` | Query IOCs and rules from the store | `--actor` and/or `--ttp`; optional `--ioc-type` |
+| `trends` | Show top trending TTPs by ingestion frequency | optional `--top N` (default 10) |
+| `actor-summary` | Print IOC/TTP/campaign summary for a threat actor | `--actor` |
+| `enrich-rule` | Print enrichment data for a stored rule | `--rule-name` |
+| `flush` | Delete all keys from the store | — |
+
+```bash
+# Query IOCs for a specific actor and TTP
+python main.py --mode query --actor apt28 --ttp T1059 --ioc-type domain
+
+# Show top 20 trending TTPs
+python main.py --mode trends --top 20
+
+# Summarise a threat actor
+python main.py --mode actor-summary --actor apt28
+
+# Flush all store data
+python main.py --mode flush
+```
 
 ### Programmatic Usage
 
