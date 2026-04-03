@@ -84,3 +84,23 @@ class RedisConfig:
     enabled: bool = field(
         default_factory=lambda: bool(os.getenv("REDIS_URL"))
     )
+
+
+class BaselineRepoConfig:
+    """Configuration for the baseline sigma rule corpus."""
+
+    SIGMA_REPO_PATH: str | None = os.getenv("SIGMA_REPO_PATH")
+    SIGMA_REPO_URL: str | None = os.getenv("SIGMA_REPO_URL")
+    SIGMA_REPO_BRANCH: str = os.getenv("SIGMA_REPO_BRANCH", "main")
+
+
+class GitHubConfig:
+    """Configuration for GitHub PR integration (optional)."""
+
+    GITHUB_TOKEN: str | None = os.getenv("GITHUB_TOKEN")
+    GITHUB_REPO: str | None = os.getenv("GITHUB_REPO")  # "owner/repo"
+    GITHUB_BRANCH: str = os.getenv("GITHUB_BRANCH", "main")
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        return bool(cls.GITHUB_TOKEN and cls.GITHUB_REPO)

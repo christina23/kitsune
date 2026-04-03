@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
@@ -27,6 +28,9 @@ load_dotenv()
 # Allow running from repo root without installing the package
 sys.path.insert(0, os.path.dirname(__file__))
 from core.intel_store import create_store
+from core.models import DetectionRule
+from core.sigma_repo import initialize_baseline_repo, get_baseline_repo
+from core.config import BaselineRepoConfig, GitHubConfig
 
 _API_DESCRIPTION = """\
 Kitsune is a threat-intelligence pipeline that ingests reports, extracts IOCs
@@ -45,6 +49,15 @@ stores everything in Redis for search and analysis.
 | Coverage matrix | `GET /coverage` |
 """
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    initialize_baseline_repo(
+        local_path=BaselineRepoConfig.SIGMA_REPO_PATH,
+        repo_url=BaselineRepoConfig.SIGMA_REPO_URL,
+    )
+    yield
+
+
 app = FastAPI(
     title="Kitsune",
     description=_API_DESCRIPTION,
@@ -52,6 +65,7 @@ app = FastAPI(
     contact={"name": "Kitsune", "url": "https://github.com/christina23/kitsune"},
     docs_url=None,   # disabled; custom Swagger served at /docs
     redoc_url=None,  # disabled; Scalar served at /scalar
+    lifespan=lifespan,
     openapi_tags=[
         {"name": "Health", "description": "Service health and connectivity checks."},
         {"name": "Pipeline", "description": "Submit threat report URLs for analysis and poll task status."},
@@ -60,6 +74,7 @@ app = FastAPI(
         {"name": "IOCs", "description": "Query indicators of compromise — IPs, domains, hashes, URLs, files."},
         {"name": "Detection Rules", "description": "Search and update Sigma / SPL detection rules."},
         {"name": "Analytics", "description": "Trending TTPs and per-technique coverage reports."},
+        {"name": "Baseline", "description": "Manage the baseline sigma rule corpus and propose rules upstream via GitHub PRs."},
     ],
 )
 
@@ -827,6 +842,29 @@ class AskResponse(BaseModel):
     data: Any = None
 
 
+class BaselineStatsResponse(BaseModel):
+    rule_count: int
+    ttps_covered: List[str]
+    loaded_at: Optional[float] = None
+    source_path: Optional[str] = None
+    source_url: Optional[str] = None
+
+
+class ProposePRRequest(BaseModel):
+    rule_ids: List[str]
+    threat_actor: Optional[str] = None
+
+
+class ProposePRResponse(BaseModel):
+    pr_url: str
+    rule_count: int
+
+
+class GitHubSyncResponse(BaseModel):
+    ingested_count: int
+    pr_urls: List[str]
+
+
 @app.post("/ask", response_model=AskResponse, tags=["Search"])
 def ask_query(req: AskRequest):
     """
@@ -902,3 +940,129 @@ def update_rule(rule_id: str, req: RuleUpdateRequest):
     if not store.update_rule(rule_id, req.rule_content):
         raise HTTPException(status_code=404, detail=f"Rule '{rule_id}' not found.")
     return {"status": "updated"}
+
+
+# ── Baseline corpus endpoints ────────────────────────────────────────────────
+
+@app.get("/baseline/stats", response_model=BaselineStatsResponse, tags=["Baseline"])
+def baseline_stats():
+    """
+    Return statistics about the loaded baseline sigma rule corpus.
+
+    Shows rule count, unique TTPs covered, when it was last loaded,
+    and the configured source path / URL.
+    """
+    repo = get_baseline_repo()
+    return BaselineStatsResponse(
+        rule_count=repo.rule_count,
+        ttps_covered=repo.ttps_covered,
+        loaded_at=repo.loaded_at,
+        source_path=BaselineRepoConfig.SIGMA_REPO_PATH,
+        source_url=BaselineRepoConfig.SIGMA_REPO_URL,
+    )
+
+
+@app.post("/baseline/reload", response_model=BaselineStatsResponse, tags=["Baseline"])
+def baseline_reload():
+    """
+    Force a reload of the baseline corpus from disk and/or GitHub.
+
+    Safe to call while the pipeline is running — the old cache remains
+    in use until the new load completes.
+    """
+    repo = initialize_baseline_repo(
+        local_path=BaselineRepoConfig.SIGMA_REPO_PATH,
+        repo_url=BaselineRepoConfig.SIGMA_REPO_URL,
+    )
+    return BaselineStatsResponse(
+        rule_count=repo.rule_count,
+        ttps_covered=repo.ttps_covered,
+        loaded_at=repo.loaded_at,
+        source_path=BaselineRepoConfig.SIGMA_REPO_PATH,
+        source_url=BaselineRepoConfig.SIGMA_REPO_URL,
+    )
+
+
+@app.post("/rules/propose-pr", response_model=ProposePRResponse, tags=["Baseline"])
+def propose_pr(req: ProposePRRequest):
+    """
+    Open a GitHub PR proposing the specified rules for inclusion in the
+    baseline repository.
+
+    Requires `GITHUB_TOKEN` and `GITHUB_REPO` to be configured.
+    Returns HTTP 503 if GitHub integration is not enabled.
+    """
+    from core.github_pr import get_github_client
+
+    gh = get_github_client()
+    if gh is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub integration not configured. Set GITHUB_TOKEN and GITHUB_REPO.",
+        )
+
+    store = get_store()
+    rules_to_propose: List[DetectionRule] = []
+    for rule_id in req.rule_ids:
+        data = store._r.hgetall(rule_id)
+        if data:
+            rules_to_propose.append(
+                DetectionRule(
+                    name=data.get("name", rule_id),
+                    description=data.get("description", ""),
+                    author=data.get("threat_actor", "kitsune"),
+                    references=[data.get("source_url", "")],
+                    mitre_ttps=json.loads(data.get("ttps", "[]")),
+                    rule_content=data.get("rule_content", ""),
+                    format=data.get("format", "sigma"),
+                )
+            )
+
+    if not rules_to_propose:
+        raise HTTPException(status_code=404, detail="No rules found for the provided IDs.")
+
+    pr_url = gh.propose_rules(rules_to_propose, threat_actor=req.threat_actor)
+    return ProposePRResponse(pr_url=pr_url, rule_count=len(rules_to_propose))
+
+
+@app.get("/github/sync", response_model=GitHubSyncResponse, tags=["Baseline"])
+def github_sync():
+    """
+    Pull merged kitsune PRs from GitHub, ingest their rules into Redis,
+    and reload the baseline corpus.
+
+    Newly merged rules become part of the baseline for all future analyze jobs.
+    Requires `GITHUB_TOKEN` and `GITHUB_REPO` to be configured.
+    """
+    from core.github_pr import get_github_client
+
+    gh = get_github_client()
+    if gh is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub integration not configured. Set GITHUB_TOKEN and GITHUB_REPO.",
+        )
+
+    store = get_store()
+    merged_rules = gh.get_merged_pr_rules()
+    ingested = 0
+
+    for rule in merged_rules:
+        try:
+            store.ingest_rules(
+                [rule],
+                source_url=f"github:{GitHubConfig.GITHUB_REPO}",
+                threat_actor="",
+                ioc_hash="",
+            )
+            ingested += 1
+        except Exception as exc:
+            print(f"[github/sync] Failed to ingest '{rule.name}': {exc}")
+
+    # Reload baseline so synced rules appear immediately
+    initialize_baseline_repo(
+        local_path=BaselineRepoConfig.SIGMA_REPO_PATH,
+        repo_url=BaselineRepoConfig.SIGMA_REPO_URL,
+    )
+
+    return GitHubSyncResponse(ingested_count=ingested, pr_urls=[])

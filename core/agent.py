@@ -44,7 +44,8 @@ from .prompts import (
     JSON_FORMAT_INSTRUCTIONS_ANTHROPIC,
 )
 from .ioc_parser import validate_and_enrich_iocs, validate_ttps
-from .coverage import analyze_gaps
+from .coverage import analyze_gaps, _tlsh_distance, _tlsh_hash, TLSH_THRESHOLD
+from .sigma_repo import get_baseline_repo
 
 
 def _compute_ioc_hash(iocs) -> str:
@@ -56,6 +57,37 @@ def _compute_ioc_hash(iocs) -> str:
         if v.strip()
     )
     return hashlib.sha256("|".join(all_values).encode()).hexdigest()[:32]
+
+
+def _filter_baseline_duplicates(
+    generated: List[DetectionRule],
+    combined_store_rules: List[Dict],
+) -> List[DetectionRule]:
+    """Return only generated rules that are not near-duplicates of baseline/store rules.
+
+    Uses TLSH fuzzy hashing with the same threshold as Phase 1 coverage analysis.
+    Rules with no computable TLSH hash (too short) pass through unconditionally.
+    """
+    baseline_hashes = [
+        h for sr in combined_store_rules
+        if (h := sr.get("tlsh_hash") or _tlsh_hash(sr.get("rule_content", "")))
+    ]
+
+    novel: List[DetectionRule] = []
+    for rule in generated:
+        rule_hash = _tlsh_hash(rule.rule_content)
+        if not rule_hash or not baseline_hashes:
+            novel.append(rule)
+            continue
+        is_dup = any(
+            (d := _tlsh_distance(rule_hash, bh)) is not None and d < TLSH_THRESHOLD
+            for bh in baseline_hashes
+        )
+        if is_dup:
+            print(f"[dedup] Skipping '{rule.name}' — duplicate of baseline rule")
+        else:
+            novel.append(rule)
+    return novel
 
 
 class ThreatDetectionAgent:
@@ -449,17 +481,24 @@ class ThreatDetectionAgent:
                     if state.get("threat_intel")
                     else ""
                 )
-                try:
-                    self.store.ingest_rules(
-                        state["detection_rules"],
-                        source_url=state["url"],
-                        threat_actor=actor,
-                        ioc_hash=ioc_hash,
-                    )
-                except Exception as store_err:
-                    print(
-                        f"[store] Rule ingest failed (non-fatal): {store_err}"
-                    )
+                novel = _filter_baseline_duplicates(
+                    state["detection_rules"],
+                    state.get("_store_rules_cache", []),
+                )
+                if novel:
+                    try:
+                        self.store.ingest_rules(
+                            novel,
+                            source_url=state["url"],
+                            threat_actor=actor,
+                            ioc_hash=ioc_hash,
+                        )
+                    except Exception as store_err:
+                        print(
+                            f"[store] Rule ingest failed (non-fatal): {store_err}"
+                        )
+                else:
+                    print("[store] All generated rules duplicated baseline; skipping ingest")
 
         except Exception as e:
             print(f"SPL rule generation failed: {str(e)}")
@@ -563,17 +602,24 @@ class ThreatDetectionAgent:
                     if state.get("threat_intel")
                     else ""
                 )
-                try:
-                    self.store.ingest_rules(
-                        state["detection_rules"],
-                        source_url=state["url"],
-                        threat_actor=actor,
-                        ioc_hash=ioc_hash,
-                    )
-                except Exception as store_err:
-                    print(
-                        f"[store] Rule ingest failed (non-fatal): {store_err}"
-                    )
+                novel = _filter_baseline_duplicates(
+                    state["detection_rules"],
+                    state.get("_store_rules_cache", []),
+                )
+                if novel:
+                    try:
+                        self.store.ingest_rules(
+                            novel,
+                            source_url=state["url"],
+                            threat_actor=actor,
+                            ioc_hash=ioc_hash,
+                        )
+                    except Exception as store_err:
+                        print(
+                            f"[store] Rule ingest failed (non-fatal): {store_err}"
+                        )
+                else:
+                    print("[store] All generated rules duplicated baseline; skipping ingest")
 
         except Exception as e:
             print(f"Sigma rule generation failed: {str(e)}")
@@ -597,7 +643,13 @@ class ThreatDetectionAgent:
                         seen_keys.add(key)
                         store_rules.append(r)
 
-        # Cache so Phase 2 can reuse without re-querying
+        # Prepend baseline corpus so Phase 1 checks it even when Redis is empty
+        baseline_dicts = get_baseline_repo().rules_as_store_dicts()
+        if baseline_dicts:
+            print(f"[COVERAGE Phase 1] +{len(baseline_dicts)} baseline corpus rules")
+            store_rules = baseline_dicts + store_rules
+
+        # Cache so Phase 2 can reuse without re-querying (includes baseline)
         state["_store_rules_cache"] = store_rules
 
         # Phase 1: TLSH-enabled, no generated rules yet
