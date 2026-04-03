@@ -78,6 +78,13 @@ appropriate
 6. Use proper Splunk functions (eval, rex, lookup, etc.)
 7. Include time-based analysis for behavioral detection
 
+CRITICAL JSON FORMATTING RULES:
+- Use ONLY single quotes for string literals in SPL (e.g., field='value', \
+NOT field="value"). Double quotes inside rule_content break JSON encoding.
+- Represent newlines in rule_content as literal \\n (backslash-n), not \
+actual line breaks.
+- Do NOT use backtick-wrapped comments (```like this```) inside rule_content.
+
 Rule naming convention: "[Actor]_[Behavior]_[System]_Detection"
 
 {json_format_section}

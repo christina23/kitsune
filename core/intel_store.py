@@ -24,6 +24,17 @@ def _sha(value: str, length: int = 16) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:length]
 
 
+def _compute_tlsh_safe(content: str) -> str:
+    """Compute TLSH hash of content; returns empty string if unavailable."""
+    try:
+        import tlsh  # py-tlsh
+
+        h = tlsh.hash(content.encode())
+        return h if h != "TNULL" else ""
+    except Exception:
+        return ""
+
+
 def _merge_json_list(existing: Optional[str], new_items: List[str]) -> str:
     """Merge new_items into a JSON-encoded list, deduplicating."""
     current: List[str] = json.loads(existing) if existing else []
@@ -87,6 +98,18 @@ class ThreatIntelStore(ABC):
         """Return IOC counts by type, TTPs, and campaigns for an actor."""
 
     @abstractmethod
+    def rules_exist_for_ioc_hash(self, ioc_hash: str) -> bool:
+        """Return True if rules are indexed under this IOC hash."""
+
+    @abstractmethod
+    def get_rules_by_ioc_hash(self, ioc_hash: str, limit: int = 50) -> List[Dict]:
+        """Return rules stored under this IOC hash."""
+
+    @abstractmethod
+    def update_rule(self, rule_id: str, new_content: str) -> bool:
+        """Update rule_content for a stored rule. Returns False if not found."""
+
+    @abstractmethod
     def flush(self) -> int:
         """Delete all keys belonging to this store's prefix. Returns count of deleted keys."""
 
@@ -137,6 +160,9 @@ class RedisIntelStore(ThreatIntelStore):
 
     def _src_rules_key(self, url: str) -> str:
         return f"{self._p}:src:{_sha(url)}:rules"
+
+    def _ioc_hash_rule_idx(self, ioc_hash: str) -> str:
+        return f"{self._p}:idx:ioc_hash:{ioc_hash}:rules"
 
     # ── Ingestion ─────────────────────────────────────────────────────────────
 
@@ -209,6 +235,7 @@ class RedisIntelStore(ThreatIntelStore):
         rules: List[DetectionRule],
         source_url: str,
         threat_actor: str,
+        ioc_hash: str = "",
     ) -> None:
         src_key = self._src_rules_key(source_url)
 
@@ -221,10 +248,13 @@ class RedisIntelStore(ThreatIntelStore):
                 if old_data:
                     old_actor = old_data.get("threat_actor", "")
                     old_ttps = json.loads(old_data.get("ttps", "[]"))
+                    old_ioc_hash = old_data.get("ioc_hash", "")
                     if old_actor:
                         pipe.srem(self._actor_rule_idx(old_actor), old_key)
                     for ttp_id in old_ttps:
                         pipe.srem(self._ttp_rule_idx(ttp_id), old_key)
+                    if old_ioc_hash:
+                        pipe.srem(self._ioc_hash_rule_idx(old_ioc_hash), old_key)
                 pipe.delete(old_key)
             pipe.delete(src_key)
             pipe.execute()
@@ -240,6 +270,9 @@ class RedisIntelStore(ThreatIntelStore):
                     "threat_actor": threat_actor,
                     "source_url": source_url,
                     "created_at": str(time.time()),
+                    "rule_content": rule.rule_content,
+                    "tlsh_hash": _compute_tlsh_safe(rule.rule_content),
+                    "ioc_hash": ioc_hash,
                 },
             )
             pipe = self._r.pipeline()
@@ -248,6 +281,8 @@ class RedisIntelStore(ThreatIntelStore):
             for ttp_id in rule.mitre_ttps:
                 pipe.sadd(self._ttp_rule_idx(ttp_id), key)
             pipe.sadd(src_key, key)
+            if ioc_hash:
+                pipe.sadd(self._ioc_hash_rule_idx(ioc_hash), key)
             pipe.execute()
 
     # ── Querying ──────────────────────────────────────────────────────────────
@@ -302,8 +337,31 @@ class RedisIntelStore(ThreatIntelStore):
         for key in list(keys)[:limit]:
             data = self._r.hgetall(key)
             if data:
-                results.append(data)
+                results.append({"rule_id": key, **data})
         return results
+
+    def rules_exist_for_ioc_hash(self, ioc_hash: str) -> bool:
+        return self._r.scard(self._ioc_hash_rule_idx(ioc_hash)) > 0
+
+    def get_rules_by_ioc_hash(self, ioc_hash: str, limit: int = 50) -> List[Dict]:
+        keys = list(self._r.smembers(self._ioc_hash_rule_idx(ioc_hash)))[:limit]
+        return [
+            {"rule_id": k, **d}
+            for k in keys
+            if (d := self._r.hgetall(k))
+        ]
+
+    def update_rule(self, rule_id: str, new_content: str) -> bool:
+        if not self._r.exists(rule_id):
+            return False
+        self._r.hset(
+            rule_id,
+            mapping={
+                "rule_content": new_content,
+                "tlsh_hash": _compute_tlsh_safe(new_content),
+            },
+        )
+        return True
 
     def get_coverage_summary(self) -> Dict[str, Dict]:
         summary: Dict[str, Dict] = {}

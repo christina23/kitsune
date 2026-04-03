@@ -47,6 +47,17 @@ from .ioc_parser import validate_and_enrich_iocs, validate_ttps
 from .coverage import analyze_gaps
 
 
+def _compute_ioc_hash(iocs) -> str:
+    """Canonical SHA-256 of all IOC values, sorted and normalised."""
+    all_values = sorted(
+        v.lower().strip()
+        for vs in iocs.to_dict().values()
+        for v in vs
+        if v.strip()
+    )
+    return hashlib.sha256("|".join(all_values).encode()).hexdigest()[:32]
+
+
 class ThreatDetectionAgent:
     """Main agent for generating threat detection rules
     from intelligence sources.
@@ -62,6 +73,7 @@ class ThreatDetectionAgent:
         **llm_kwargs,
     ):
         self.store = store
+        self._last_state: Optional[AgentState] = None
         self.llm_provider = llm_provider or os.getenv("LLM_PROVIDER", "openai")
         self.llm_factory = LLMFactory(
             default_provider=self.llm_provider, api_keys=api_keys
@@ -112,11 +124,20 @@ class ThreatDetectionAgent:
                     chain = prompt | self.llm
 
                 response = chain.invoke({})
-                response_text = (
-                    response.content
-                    if hasattr(response, "content")
-                    else str(response)
-                )
+                raw = getattr(response, "content", None) or str(response)
+                # Claude with extended thinking returns content as a list of
+                # blocks: [{"type": "thinking", ...}, {"type": "text", ...}]
+                # Extract only the text blocks.
+                if isinstance(raw, list):
+                    response_text = "\n".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in raw
+                        if not (isinstance(b, dict) and b.get("type") == "thinking")
+                    )
+                else:
+                    response_text = raw
+                if not response_text.strip():
+                    raise ValueError("Empty response from LLM")
 
                 # Extract and validate JSON
                 result = extract_json_from_text(response_text)
@@ -157,24 +178,27 @@ class ThreatDetectionAgent:
 
     def _route_to_rule_generator(self, state: AgentState) -> str:
         """Route to appropriate rule generator based on format"""
-        # Check if threat_intel extraction failed
         if state.get("threat_intel") is None:
-            # Skip rule generation if no threat intel
             return "end"
         return state.get("rule_format", "spl")
 
     def _create_workflow(self) -> StateGraph:
-        """Create the LangGraph workflow"""
+        """Create the LangGraph workflow.
+
+        Order: fetch → extract → analyze_coverage (Phase 1, vs store) →
+               generate_rules (Phase 2 coverage update inline) → END
+        """
         workflow = StateGraph(AgentState)
         workflow.add_node("fetch_content", self._fetch_content)
         workflow.add_node("extract_threat_intel", self._extract_threat_intel)
+        workflow.add_node("analyze_coverage", self._analyze_coverage)
         workflow.add_node("generate_sigma_rules", self._generate_sigma_rules)
         workflow.add_node("generate_spl_rules", self._generate_spl_rules)
-        workflow.add_node("analyze_coverage", self._analyze_coverage)
         workflow.set_entry_point("fetch_content")
         workflow.add_edge("fetch_content", "extract_threat_intel")
+        workflow.add_edge("extract_threat_intel", "analyze_coverage")
         workflow.add_conditional_edges(
-            "extract_threat_intel",
+            "analyze_coverage",
             self._route_to_rule_generator,
             {
                 "sigma": "generate_sigma_rules",
@@ -182,9 +206,8 @@ class ThreatDetectionAgent:
                 "end": END,
             },
         )
-        workflow.add_edge("generate_sigma_rules", "analyze_coverage")
-        workflow.add_edge("generate_spl_rules", "analyze_coverage")
-        workflow.add_edge("analyze_coverage", END)
+        workflow.add_edge("generate_sigma_rules", END)
+        workflow.add_edge("generate_spl_rules", END)
         return workflow
 
     def _fetch_content(self, state: AgentState) -> AgentState:
@@ -283,10 +306,6 @@ class ThreatDetectionAgent:
 
         return state
 
-    def _route_to_rule_generator(self, state: AgentState) -> str:
-        """Route to appropriate rule generator based on format"""
-        return state.get("rule_format", "spl")
-
     def generate_detections(
         self, url: str, rule_format: Literal["sigma", "spl"] = "spl"
     ) -> List[DetectionRule]:
@@ -299,15 +318,18 @@ class ThreatDetectionAgent:
             "coverage_gaps": [],
             "rule_format": rule_format,
             "error": None,
+            "_store_rules_cache": [],
         }
+        import uuid as _uuid
         config = {
             "configurable": {
-                "thread_id": f"threat-detection-{hash(url) % 1000}"
+                "thread_id": f"threat-detection-{_uuid.uuid4().hex[:12]}"
             }
         }
 
         try:
             result = self.app.invoke(initial_state, config)
+            self._last_state = result
             if result.get("error"):
                 print(f"Error: {result['error']}")
             return result.get("detection_rules", [])
@@ -341,6 +363,37 @@ class ThreatDetectionAgent:
 
         intel = state["threat_intel"]
         author = determine_author(state["url"], intel.threat_actor)
+
+        # IOC dedup check: skip generation if rules for this IOC set already exist
+        ioc_hash = (
+            _compute_ioc_hash(intel.iocs)
+            if intel.iocs and not intel.iocs.is_empty()
+            else ""
+        )
+        if ioc_hash and self.store and self.store.rules_exist_for_ioc_hash(ioc_hash):
+            existing = self.store.get_rules_by_ioc_hash(ioc_hash)
+            import json as _json
+            # Only reuse cached rules if they match the requested format
+            matching = [r for r in existing if r.get("format", "spl") == "spl" and r.get("rule_content")]
+            if matching:
+                print(
+                    f"[store] Rules exist for IOC set ({ioc_hash[:8]}…),"
+                    " skipping SPL generation"
+                )
+                state["detection_rules"] = [
+                    DetectionRule(
+                        name=r["name"],
+                        description="(retrieved from store)",
+                        author="",
+                        references=[],
+                        mitre_ttps=_json.loads(r.get("ttps", "[]")),
+                        rule_content=r.get("rule_content", ""),
+                        format="spl",
+                    )
+                    for r in matching
+                ]
+                self._phase2_coverage_update(state)
+                return state
 
         prompt_content = SPL_GENERATION_PROMPT.format(
             threat_actor=intel.threat_actor or "Unknown",
@@ -387,6 +440,9 @@ class ThreatDetectionAgent:
             )
             print(f"Generated {len(state['detection_rules'])} SPL rules")
 
+            # Phase 2: update coverage gaps with the new rules
+            self._phase2_coverage_update(state)
+
             if self.store and state.get("detection_rules"):
                 actor = (
                     (state["threat_intel"].threat_actor or "")
@@ -398,6 +454,7 @@ class ThreatDetectionAgent:
                         state["detection_rules"],
                         source_url=state["url"],
                         threat_actor=actor,
+                        ioc_hash=ioc_hash,
                     )
                 except Exception as store_err:
                     print(
@@ -421,6 +478,37 @@ class ThreatDetectionAgent:
 
         intel = state["threat_intel"]
         author = determine_author(state["url"], intel.threat_actor)
+
+        # IOC dedup check: skip generation if rules for this IOC set already exist
+        ioc_hash = (
+            _compute_ioc_hash(intel.iocs)
+            if intel.iocs and not intel.iocs.is_empty()
+            else ""
+        )
+        if ioc_hash and self.store and self.store.rules_exist_for_ioc_hash(ioc_hash):
+            existing = self.store.get_rules_by_ioc_hash(ioc_hash)
+            import json as _json
+            # Only reuse cached rules if they match the requested format
+            matching = [r for r in existing if r.get("format", "sigma") == "sigma" and r.get("rule_content")]
+            if matching:
+                print(
+                    f"[store] Rules exist for IOC set ({ioc_hash[:8]}…),"
+                    " skipping Sigma generation"
+                )
+                state["detection_rules"] = [
+                    DetectionRule(
+                        name=r["name"],
+                        description="(retrieved from store)",
+                        author="",
+                        references=[],
+                        mitre_ttps=_json.loads(r.get("ttps", "[]")),
+                        rule_content=r.get("rule_content", ""),
+                        format="sigma",
+                    )
+                    for r in matching
+                ]
+                self._phase2_coverage_update(state)
+                return state
 
         prompt_content = SIGMA_GENERATION_PROMPT.format(
             threat_actor=intel.threat_actor or "Unknown",
@@ -466,6 +554,9 @@ class ThreatDetectionAgent:
             )
             print(f"Generated {len(state['detection_rules'])} Sigma rules")
 
+            # Phase 2: update coverage gaps with the new rules
+            self._phase2_coverage_update(state)
+
             if self.store and state.get("detection_rules"):
                 actor = (
                     (state["threat_intel"].threat_actor or "")
@@ -477,6 +568,7 @@ class ThreatDetectionAgent:
                         state["detection_rules"],
                         source_url=state["url"],
                         threat_actor=actor,
+                        ioc_hash=ioc_hash,
                     )
                 except Exception as store_err:
                     print(
@@ -491,26 +583,61 @@ class ThreatDetectionAgent:
         return state
 
     def _analyze_coverage(self, state: AgentState) -> AgentState:
-        """Identify MITRE techniques lacking a corresponding detection rule."""
+        """Phase 1 coverage: compare extracted techniques vs store rules with TLSH."""
         techniques = getattr(state.get("threat_intel"), "techniques", []) or []
-        gaps = analyze_gaps(techniques, state.get("detection_rules", []))
+
+        # Query store for existing rules covering each technique
+        store_rules: List[Dict] = []
+        if self.store:
+            seen_keys: set = set()
+            for tech in techniques:
+                for r in self.store.query_rules(ttp=tech.id, limit=20):
+                    key = r.get("rule_id", r.get("name", ""))
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        store_rules.append(r)
+
+        # Cache so Phase 2 can reuse without re-querying
+        state["_store_rules_cache"] = store_rules
+
+        # Phase 1: TLSH-enabled, no generated rules yet
+        gaps = analyze_gaps(
+            techniques,
+            generated_rules=[],
+            store_rules=store_rules,
+            use_tlsh=True,
+        )
         state["coverage_gaps"] = gaps
+
         if gaps:
-            print(f"\n[COVERAGE GAPS] {len(gaps)} uncovered technique(s):")
+            print(f"\n[COVERAGE Phase 1] {len(gaps)} gap(s) vs store (TLSH enabled):")
             for g in gaps:
-                print(
-                    f"  [{g.priority.upper()}]"
-                    f" {g.technique_id} ({g.tactic})"
-                )
-                print(
-                    "    Data sources needed: " + ", ".join(g.data_sources[:2])
-                )
+                fuzzy = " ~fuzzy" if g.fuzzy_match else ""
+                print(f"  [{g.priority.upper()}] {g.technique_id} ({g.tactic}){fuzzy}")
         else:
-            print(
-                "[COVERAGE] All techniques have corresponding"
-                " detection rules."
-            )
+            print("[COVERAGE Phase 1] All techniques have existing store coverage.")
+
         return state
+
+    def _phase2_coverage_update(self, state: AgentState) -> None:
+        """Phase 2: update coverage gaps after rule generation (exact TTP match, no TLSH)."""
+        techniques = getattr(state.get("threat_intel"), "techniques", []) or []
+        generated = state.get("detection_rules", [])
+        store_rules = state.get("_store_rules_cache", [])
+
+        pre_count = len(state.get("coverage_gaps", []))
+        updated_gaps = analyze_gaps(
+            techniques,
+            generated,
+            store_rules=store_rules,
+            use_tlsh=False,
+        )
+        state["coverage_gaps"] = updated_gaps
+        filled = max(0, pre_count - len(updated_gaps))
+        print(
+            f"[COVERAGE Phase 2] {len(updated_gaps)} gap(s) remaining"
+            f" ({filled} filled by new rules)"
+        )
 
     def _finalize_rules(
         self,

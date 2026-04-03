@@ -6,10 +6,37 @@ identify which techniques lack coverage, their priority, and recommended
 data sources.
 """
 
-from typing import Dict, List
+import json
+from typing import Dict, List, Optional
 
 from .ioc_parser import Technique
 from .models import DetectionRule, CoverageGap
+
+# Maximum TLSH distance to consider two content blobs "similar"
+TLSH_THRESHOLD = 150
+
+
+def _tlsh_hash(content: str) -> str:
+    """Compute TLSH hash; returns empty string if py-tlsh unavailable or content too short."""
+    try:
+        import tlsh  # py-tlsh
+
+        h = tlsh.hash(content.encode())
+        return h if h != "TNULL" else ""
+    except Exception:
+        return ""
+
+
+def _tlsh_distance(h1: str, h2: str) -> Optional[int]:
+    """Return TLSH distance between two hashes, or None if either is empty."""
+    if not h1 or not h2:
+        return None
+    try:
+        import tlsh
+
+        return tlsh.diff(h1, h2)
+    except Exception:
+        return None
 
 # Maps top-level technique IDs to the log sources most likely to detect them
 TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {
@@ -132,6 +159,8 @@ TECHNIQUE_DATA_SOURCES: Dict[str, List[str]] = {
 def analyze_gaps(
     techniques: List[Technique],
     generated_rules: List[DetectionRule],
+    store_rules: Optional[List[Dict]] = None,
+    use_tlsh: bool = True,
 ) -> List[CoverageGap]:
     """
     Identify which extracted techniques have no corresponding detection rule.
@@ -145,24 +174,52 @@ def analyze_gaps(
       >= 0.75 → "medium"
       < 0.75  → "low"
 
+    When use_tlsh=True (Phase 1), techniques not covered by exact TTP match
+    are checked against rule content via TLSH fuzzy hashing. A fuzzy match
+    produces a "low" priority gap with fuzzy_match=True rather than a full gap.
+
+    store_rules: raw dicts from RedisIntelStore.query_rules() — used in Phase 1
+    to check existing store coverage before new rules are generated.
+
     Returns gaps sorted: high first, then descending confidence.
     """
-    # Build set of all technique IDs covered by existing rules (normalized)
+    # Build set of all technique IDs covered by generated rules (normalized)
     covered: set = set()
     for rule in generated_rules:
         for tid in rule.mitre_ttps:
             tid_upper = tid.strip().upper()
             covered.add(tid_upper)
-            # Also register the parent so sub-techniques count
-            parent = tid_upper.split(".")[0]
-            covered.add(parent)
+            covered.add(tid_upper.split(".")[0])
+
+    # Also add coverage from store rules
+    if store_rules:
+        for sr in store_rules:
+            for tid in json.loads(sr.get("ttps", "[]")):
+                tid_upper = tid.strip().upper()
+                covered.add(tid_upper)
+                covered.add(tid_upper.split(".")[0])
+
+    # Build TLSH content pairs for fuzzy checking (Phase 1 only)
+    rule_tlsh_pairs: List[str] = []
+    if use_tlsh:
+        for rule in generated_rules:
+            h = _tlsh_hash(rule.rule_content)
+            if h:
+                rule_tlsh_pairs.append(h)
+        if store_rules:
+            for sr in store_rules:
+                h = sr.get("tlsh_hash", "")
+                if not h and sr.get("rule_content"):
+                    h = _tlsh_hash(sr["rule_content"])
+                if h:
+                    rule_tlsh_pairs.append(h)
 
     gaps: List[CoverageGap] = []
     for tech in techniques:
         tid = tech.id.upper()
         parent = tid.split(".")[0]
 
-        # Covered if exact ID or parent is in any rule
+        # Exact coverage check
         if tid in covered or parent in covered:
             continue
 
@@ -176,6 +233,39 @@ def analyze_gaps(
         data_sources = TECHNIQUE_DATA_SOURCES.get(
             parent, ["General endpoint/network telemetry"]
         )
+
+        # TLSH fuzzy check (Phase 1 only, requires ≥50 bytes of context)
+        if use_tlsh and tech.context and len(tech.context) >= 50 and rule_tlsh_pairs:
+            tech_hash = _tlsh_hash(tech.context)
+            fuzzy_covered = False
+            best_dist: Optional[int] = None
+            if tech_hash:
+                for rh in rule_tlsh_pairs:
+                    dist = _tlsh_distance(tech_hash, rh)
+                    if dist is not None:
+                        if best_dist is None or dist < best_dist:
+                            best_dist = dist
+                        if dist < TLSH_THRESHOLD:
+                            fuzzy_covered = True
+                            break
+
+            if fuzzy_covered and best_dist is not None:
+                gaps.append(
+                    CoverageGap(
+                        technique_id=tid,
+                        tactic=tech.tactic,
+                        priority="low",
+                        reason=(
+                            f"Possible fuzzy coverage for {tid} ({tech.tactic})"
+                            f" via TLSH dist={best_dist}; verify manually"
+                        ),
+                        data_sources=data_sources,
+                        confidence=tech.confidence,
+                        fuzzy_match=True,
+                        fuzzy_score=float(best_dist),
+                    )
+                )
+                continue
 
         gaps.append(
             CoverageGap(

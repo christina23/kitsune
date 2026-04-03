@@ -2,30 +2,46 @@
 name = "kitsune"
 version = "0.2.0"
 description = "AI-driven threat detection rule generation from threat intelligence reports"
-authors = [
-    {name = "Christina23"}
-]
+authors = [{name = "Christina23"}]
 readme = "README.md"
-requires-python = ">=3.12,<4.0"
+requires-python = ">=3.12"
 dependencies = [
-    "python-dotenv>=1.0.0,<2.0.0",
+    "python-dotenv>=1.0.0",
     "langchain-core>=0.3.76,<0.4.0",
     "langchain-community>=0.3.29,<0.4.0",
     "langchain-anthropic>=0.3.20,<0.4.0",
     "langchain-openai>=0.3.33,<0.4.0",
     "langgraph>=0.6.7,<0.7.0",
-    "beautifulsoup4>=4.13.5,<5.0.0",
-    "requests>=2.32.5,<3.0.0",
-    "redis[hiredis]>=5.0.0,<8.0.0",
-    "fastapi>=0.115.0,<1.0.0",
-    "uvicorn[standard]>=0.30.0,<1.0.0",
-    "streamlit>=1.40.0,<2.0.0"
+    "beautifulsoup4>=4.13.5",
+    "requests>=2.32.5",
+    "redis[hiredis]>=5.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "streamlit>=1.40.0",
+    "py-tlsh>=4.7.2",
+    "json-repair>=0.30.0",
 ]
 
-[tool.black]
-line-length = 79
-target-version = ["py312"]
+[dependency-groups]
+dev = [{include-group = "lint"}, {include-group = "test"}]
+lint = ["ruff>=0.9.0", "ty>=0.0.1a6"]
+test = ["pytest>=8.0.0", "pytest-cov>=5.0.0"]
 
 [build-system]
-requires = ["poetry-core>=2.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.7.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "PIE", "RET"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--cov=core", "--cov-report=term-missing"]
+
+[tool.ty.environment]
+python-version = "3.12"
