@@ -8,6 +8,8 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 - **Multiple Rule Formats**: Generates Splunk SPL and Sigma detection rules
 - **Validated IOC/TTP Extraction**: Regex + LLM extraction with confidence scoring, deduplication, and MITRE ATT&CK validation
 - **Coverage Gap Analysis**: Compares extracted techniques against generated rules and reports undetected TTPs with priority and recommended data sources
+- **Baseline Sigma Corpus**: Loads a local directory or private GitHub repo of sigma rules at startup; every analyze job checks new rules against the full corpus via TLSH fuzzy matching before ingesting
+- **GitHub PR Integration**: Propose accepted novel rules to a upstream sigma repo as a pull request; sync merged PRs back into the store automatically
 - **Redis Store**: Optional persistent IOC and detection rule store with actor/TTP indexing and trend analytics
 - **Search UI**: Streamlit app for querying across IOCs, rules, actors, trends, and coverage gaps
 - **REST API**: FastAPI backend with Scalar and Swagger interactive docs
@@ -32,7 +34,9 @@ kitsune/
 │   ├── agent.py          # ThreatDetectionAgent class (LangGraph workflow)
 │   ├── models.py         # Pydantic data models
 │   ├── ioc_parser.py     # IOC + TTP extraction, validation, and confidence scoring
-│   ├── coverage.py       # Coverage gap analysis
+│   ├── coverage.py       # Coverage gap analysis with TLSH fuzzy matching
+│   ├── sigma_repo.py     # Baseline sigma corpus loader + in-memory singleton
+│   ├── github_pr.py      # GitHub PR client for proposing/syncing rules
 │   ├── config.py         # Configuration settings
 │   ├── llm_factory.py    # LLM provider factory
 │   ├── utils.py          # Utility functions
@@ -91,6 +95,12 @@ streamlit run app.py                   # Terminal 2
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `REDIS_KEY_PREFIX` | Namespace prefix for Redis keys | `kitsune` |
 | `USER_AGENT` | HTTP User-Agent for fetching intel URLs | `kitsune/1.0` |
+| `SIGMA_REPO_PATH` | Local directory of baseline sigma rules (recursive) | — |
+| `SIGMA_REPO_URL` | GitHub HTTPS URL to clone/pull baseline rules from | — |
+| `SIGMA_REPO_BRANCH` | Branch to use when cloning via `SIGMA_REPO_URL` | `main` |
+| `GITHUB_TOKEN` | GitHub PAT for PR integration (`pip install PyGithub` required) | — |
+| `GITHUB_REPO` | Target repo for rule PRs in `owner/repo` format | — |
+| `GITHUB_BRANCH` | Base branch for rule PRs | `main` |
 
 ## Usage
 
@@ -140,6 +150,50 @@ rules = agent.generate_detections("https://example.com/threat-report", rule_form
 for rule in rules:
     print(rule.name, rule.mitre_ttps)
 ```
+
+## Baseline Sigma Corpus
+
+Kitsune can load a directory of existing sigma rules at startup and use them as a baseline for every analyze job. This means:
+
+- Phase 1 coverage analysis checks new LLM-generated rules against the full corpus, not just what's already in Redis
+- Rules that are near-duplicates of baseline rules (TLSH distance < 150) are deduplicated and not re-ingested into Redis
+- Only genuinely novel rules are stored, keeping the Redis store focused on incremental improvements
+
+### Local directory
+
+```bash
+SIGMA_REPO_PATH=/path/to/sigma/rules   # directory is scanned recursively for .yml files
+```
+
+### Private GitHub repo
+
+```bash
+SIGMA_REPO_URL=https://github.com/org/sigma-rules.git
+pip install gitpython
+```
+
+The repo is cloned to `~/.cache/kitsune/sigma_repo` on first startup and pulled on each reload.
+
+## GitHub PR Integration
+
+Accepted novel rules can be proposed back to the upstream sigma repo as pull requests. Merged PRs are synced back into Redis and the baseline corpus automatically.
+
+### Setup
+
+```bash
+GITHUB_TOKEN=ghp_...
+GITHUB_REPO=owner/sigma-rules
+pip install PyGithub
+```
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /baseline/stats` | Rule count, TTPs covered, and load timestamp for the current corpus |
+| `POST /baseline/reload` | Hot-reload the corpus from disk/GitHub without restarting |
+| `POST /rules/propose-pr` | Open a PR to the upstream repo with specified rule IDs |
+| `GET /github/sync` | Pull merged kitsune PRs, ingest rules into Redis, reload baseline |
 
 ## Extending
 
