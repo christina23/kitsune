@@ -693,12 +693,12 @@ else:
 
     # Example query chips (clickable buttons)
     _EXAMPLES = [
-        "List all threat actors",
-        "Top 5 TTPs",
+        "Top 10 TTPs",
         "Show coverage gaps",
-        "IOCs for T1059",
-        "Rules for UNC6395",
-        "Which TTPs have no rules?",
+        "Rules for T1059",
+        "Which TTPs have rules?",
+        "List all threat actors",
+        "What detection rules exist?",
     ]
 
     # CSS to style chip buttons

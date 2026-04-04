@@ -272,8 +272,8 @@ class BaselineSigmaRepo:
             f"({len(self.ttps_covered)} unique TTPs)"
         )
 
-        # Sync to Redis if store is available
-        if store and self._last_head_sha:
+        # Sync to Redis if store is available (local or git source)
+        if store and rules:
             self.sync_to_redis(store)
 
     def reload(self) -> int:
