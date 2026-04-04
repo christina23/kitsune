@@ -501,7 +501,7 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest", store=None) -> None:
         if store is None:
             store = create_store()
 
-        _set_task(task_id, step="Initialising agent…")
+        _set_task(task_id, step="Initializing agent…")
         from core.agent import ThreatDetectionAgent
 
         agent = ThreatDetectionAgent(llm_provider=req.llm_provider, store=store)
@@ -946,8 +946,15 @@ _ASK_SYSTEM = (
     "You are a threat intelligence search assistant for the Kitsune platform. "
     "Given a user query, determine which tool to call and with what parameters. "
     "Always use exactly one tool — never answer from your own knowledge. "
+    "The store contains both baseline detection rules (from a sigma corpus) and "
+    "pipeline-generated rules. When the user asks about what rules exist, coverage, "
+    "or rule counts, prefer get_coverage — it includes all rules (baseline + generated). "
+    "Use search_rules only when the user wants to see specific rule content filtered by actor or TTP. "
     "If the user asks about TTPs, techniques, or MITRE ATT&CK, prefer get_trending_ttps or get_coverage. "
-    "If the user asks about actors or threat groups, prefer list_actors or get_actor_summary."
+    "If the user asks about actors or threat groups, prefer list_actors or get_actor_summary. "
+    "For queries about recently created or newest rules, use search_rules with no filters — "
+    "the results are ordered by recency. "
+    "For queries about newly added reports or threat actors, use list_actors."
 )
 
 

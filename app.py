@@ -375,6 +375,11 @@ def _poll_pipeline():
         st.session_state["pipeline_result"] = task.get("result", {})
         st.session_state["pipeline_task_id"] = None
         st.rerun()
+    elif task["status"] == "pending_review" or task.get("review_status") == "pending_review":
+        # Hand off to the review panel
+        st.session_state["review_task_id"] = task_id
+        st.session_state["pipeline_task_id"] = None
+        st.rerun()
     elif task["status"] == "error":
         st.error(f"Pipeline failed: {task.get('error', 'unknown error')}")
         st.session_state["pipeline_task_id"] = None
@@ -386,6 +391,7 @@ def _poll_pipeline():
             "Phase 1 coverage analysis…",
             "Generating SPL rules…",
             "Generating Sigma rules…",
+            "Validating rules…",
             "Complete",
         ]
         idx = _STEPS.index(step) if step in _STEPS else 0
@@ -397,25 +403,7 @@ def _poll_pipeline():
 
 _poll_pipeline()
 
-
-# ── Review Panel (fragment) ──────────────────────────────────────────────────
-
-
-@st.fragment
-def _poll_review():
-    """Poll for pending_review status and show the review panel."""
-    task_id = st.session_state.get("pipeline_task_id")
-    if not task_id:
-        return
-    task = _get(f"/tasks/{task_id}")
-    if not task:
-        return
-    if task.get("status") == "pending_review" or task.get("review_status") == "pending_review":
-        st.session_state["review_task_id"] = task_id
-        st.session_state["pipeline_task_id"] = None
-
-
-_poll_review()
+# ── Review Panel ─────────────────────────────────────────────────────────────
 
 review_task_id = st.session_state.get("review_task_id")
 if review_task_id and not st.session_state.get("pipeline_result"):
@@ -558,18 +546,19 @@ if pipeline_result and not pipeline_result.get("error"):
             st.caption("No IOCs extracted from this report.")
         else:
             active_types = [k for k, v in iocs_data.items() if v]
-            ioc_cols = st.columns(min(len(active_types), 5))
+            ioc_cols = st.columns(min(len(active_types), 3))
             for col_idx, ioc_type in enumerate(active_types):
                 values = iocs_data[ioc_type]
                 with ioc_cols[col_idx % len(ioc_cols)]:
                     st.markdown(
                         f"{_ioc_type_badge(ioc_type)} "
-                        f'<span style="color:#8b949e; font-size:0.75rem;">x{len(values)}</span>',
+                        f'<span style="color:#8b949e; font-size:0.85rem;">x{len(values)}</span>',
                         unsafe_allow_html=True,
                     )
                     for v in values[:10]:
                         st.markdown(
-                            f'<code style="font-size:0.72rem; color:#c9d1d9;">{v}</code>',
+                            f'<code style="font-size:0.85rem; color:#c9d1d9; '
+                            f'word-break:break-all;">{v}</code>',
                             unsafe_allow_html=True,
                         )
                     if len(values) > 10:
@@ -671,8 +660,15 @@ else:
     coverage = _load_coverage()
 
     total_iocs = sum(e.get("ioc_count", 0) for e in coverage)
-    total_rules = sum(e.get("rule_count", 0) for e in coverage)
     no_rules = sum(1 for e in coverage if not e.get("has_rules"))
+
+    # Fetch unique rule count (coverage sums per-TTP which double-counts)
+    try:
+        _rules_resp = requests.get(f"{API_URL}/rules", params={"limit": 1000}, timeout=5)
+        _rules_resp.raise_for_status()
+        total_rules = len(_rules_resp.json() or [])
+    except Exception:
+        total_rules = sum(e.get("rule_count", 0) for e in coverage)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Actors Tracked", len(actors))
@@ -693,12 +689,12 @@ else:
 
     # Example query chips (clickable buttons)
     _EXAMPLES = [
-        "Top 10 TTPs",
-        "Show coverage gaps",
-        "Rules for T1059",
-        "Which TTPs have rules?",
-        "List all threat actors",
-        "What detection rules exist?",
+        "Top 10 TTPs covered",
+        "Show coverage matrix",
+        "Recently created rules",
+        "Newly added reports",
+        "Which actors are tracked?",
+        "Any gaps in coverage?",
     ]
 
     # CSS to style chip buttons

@@ -51,7 +51,7 @@ from .sigma_repo import get_baseline_repo
 
 
 def _compute_ioc_hash(iocs) -> str:
-    """Canonical SHA-256 of all IOC values, sorted and normalised."""
+    """Canonical SHA-256 of all IOC values, sorted and normalized."""
     all_values = sorted(
         v.lower().strip()
         for vs in iocs.to_dict().values()
@@ -330,7 +330,7 @@ class ThreatDetectionAgent:
             raw_intel.setdefault("targeted_systems", [])
             raw_intel.setdefault("key_behaviors", [])
 
-            # Validate, normalise, and regex-enrich IOCs
+            # Validate, normalize, and regex-enrich IOCs
             raw_intel["iocs"] = validate_and_enrich_iocs(
                 raw_intel.get("iocs") or {},
                 raw_text=state["content"],
@@ -598,6 +598,7 @@ class ThreatDetectionAgent:
         - YAML parse check for sigma rules (title, logsource, detection)
         - TTP consistency: rule TTPs should match extracted threat intel
         - Content safety check against forbidden terms
+        - Detection quality checks (behavioral depth, cardinality, false positives)
         """
         rules = state.get("detection_rules", [])
         intel = state.get("threat_intel")
@@ -611,14 +612,16 @@ class ThreatDetectionAgent:
             issues: List[str] = []
 
             # YAML structure check (sigma rules only)
+            parsed_sigma = None
             if rule.format == "sigma":
                 try:
-                    parsed = _yaml.safe_load(rule.rule_content)
-                    if not isinstance(parsed, dict):
+                    parsed_sigma = _yaml.safe_load(rule.rule_content)
+                    if not isinstance(parsed_sigma, dict):
                         issues.append("Rule content is not valid YAML dict")
+                        parsed_sigma = None
                     else:
                         for required_key in ("title", "logsource", "detection"):
-                            if required_key not in parsed:
+                            if required_key not in parsed_sigma:
                                 issues.append(f"Missing required sigma key: {required_key}")
                 except _yaml.YAMLError as exc:
                     issues.append(f"YAML parse error: {exc}")
@@ -637,6 +640,9 @@ class ThreatDetectionAgent:
             for term in Settings.FORBIDDEN_TERMS:
                 if term.lower() in content_lower:
                     issues.append(f"Contains forbidden term: '{term}'")
+
+            # ── Detection quality checks ────────────────────────────────
+            self._check_detection_quality(rule, parsed_sigma, issues)
 
             # Determine verdict
             if any("YAML parse error" in i or "not valid YAML" in i for i in issues):
@@ -664,6 +670,71 @@ class ThreatDetectionAgent:
         )
 
         return state
+
+    @staticmethod
+    def _check_detection_quality(
+        rule: DetectionRule,
+        parsed_sigma: Optional[dict],
+        issues: List[str],
+    ) -> None:
+        """Signal detection theory quality checks.
+
+        Flags potential problems but does not block — detection engineers
+        make the final call during review.
+        """
+        content = rule.rule_content
+        content_lower = content.lower()
+
+        # 1. Atomic-only detection: flag rules that match only on static
+        #    IOC values (IPs, hashes, domains) without behavioral context
+        _ioc_patterns = ("src_ip=", "dest_ip=", "ip=", "hash=", "md5=",
+                         "sha256=", "domain=", "SourceIp:", "DestinationIp:")
+        _behavioral_keywords = ("stats ", "count", "| rare", "| outlier",
+                                "timeframe:", "| bucket", "| streamstats",
+                                "group-by", "near", "temporal", "| where",
+                                "condition:", "aggregate")
+        has_ioc_match = any(p.lower() in content_lower for p in _ioc_patterns)
+        has_behavioral = any(k.lower() in content_lower for k in _behavioral_keywords)
+        if has_ioc_match and not has_behavioral:
+            issues.append(
+                "Quality: rule matches only on atomic IOCs without behavioral "
+                "context — consider adding aggregation or temporal logic"
+            )
+
+        # 2. Missing false-positive exclusion (sigma rules)
+        if parsed_sigma and isinstance(parsed_sigma, dict):
+            if "falsepositives" not in parsed_sigma:
+                issues.append(
+                    "Quality: missing 'falsepositives' section — add expected "
+                    "benign triggers to help analysts triage"
+                )
+            # Check for filter selections in detection block
+            detection = parsed_sigma.get("detection", {})
+            if isinstance(detection, dict):
+                has_filter = any(
+                    k.startswith("filter") for k in detection.keys()
+                )
+                if not has_filter:
+                    issues.append(
+                        "Quality: no filter_* selection in detection block — "
+                        "consider adding exclusions for known benign patterns"
+                    )
+
+        # 3. SPL rules: check for entity scoping (stats ... by <entity>)
+        if rule.format == "spl":
+            if "stats " in content_lower and " by " not in content_lower:
+                issues.append(
+                    "Quality: stats command without 'by' clause — add entity "
+                    "scoping (user, host, src_ip) for actionable alerts"
+                )
+            # Check for time windowing
+            time_keywords = ("span=", "earliest=", "latest=", "bucket _time",
+                             "streamstats window=")
+            if not any(k in content_lower for k in time_keywords):
+                issues.append(
+                    "Quality: no temporal windowing — consider adding span= "
+                    "or bucket to detect bursts within a time window"
+                )
 
     # ── Review node ──────────────────────────────────────────────────────────
 

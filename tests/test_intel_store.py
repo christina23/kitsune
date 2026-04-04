@@ -1,6 +1,6 @@
 """
 Tests for RedisIntelStore focusing on the flush() and URL-based rule
-deduplication behaviour added in the latest change.
+deduplication behavior added in the latest change.
 
 Uses unittest.mock to patch the underlying Redis client so no live
 Redis server is required.

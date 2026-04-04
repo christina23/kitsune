@@ -406,8 +406,10 @@ class RedisIntelStore(ThreatIntelStore):
         elif ttp:
             keys = self._r.smembers(self._ttp_rule_idx(ttp))
         else:
-            # Scan for all rule keys
+            # Scan for all rule keys (pipeline + baseline)
             keys = list(self._r.scan_iter(f"{self._p}:rule:*"))
+            baseline_keys = list(self._r.smembers(self._baseline_rules_set_key()))
+            keys = list(dict.fromkeys(keys + baseline_keys))  # dedupe, preserve order
 
         keys_list = list(keys)[:limit]
         if not keys_list:
