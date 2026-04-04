@@ -235,6 +235,28 @@ def _priority_badge(priority: str) -> str:
     return _pill(priority.upper(), bg, fg)
 
 
+def _relative_time(epoch_str: str) -> str:
+    """Convert an epoch timestamp string to a human-readable relative time."""
+    try:
+        ts = float(epoch_str)
+        delta = time.time() - ts
+        if delta < 60:
+            return "just now"
+        elif delta < 3600:
+            m = int(delta // 60)
+            return f"{m}m ago"
+        elif delta < 86400:
+            h = int(delta // 3600)
+            return f"{h}h ago"
+        elif delta < 604800:
+            d = int(delta // 86400)
+            return f"{d}d ago"
+        else:
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return ""
+
+
 def _ioc_type_badge(ioc_type: str) -> str:
     colors = {
         "ip": ("#0d2d45", "#56d4fb"),
@@ -538,6 +560,20 @@ if pipeline_result and not pipeline_result.get("error"):
         )
 
         # ── Extracted IOCs (directly visible) ─────────────────────────────────
+        # Fetch enriched IOC data from Redis (has first_seen timestamps)
+        _actor = pipeline_result.get("threat_actor") or ""
+        _enriched_iocs: Dict[str, Dict] = {}
+        if _actor:
+            try:
+                _ioc_resp = requests.get(
+                    f"{API_URL}/iocs", params={"actor": _actor, "limit": 200}, timeout=5
+                )
+                if _ioc_resp.ok:
+                    for rec in _ioc_resp.json():
+                        _enriched_iocs[rec.get("value", "")] = rec
+            except Exception:
+                pass
+
         st.markdown(
             '<div class="section-header">Extracted IOCs</div>',
             unsafe_allow_html=True,
@@ -556,13 +592,20 @@ if pipeline_result and not pipeline_result.get("error"):
                         unsafe_allow_html=True,
                     )
                     for v in values[:10]:
+                        enriched = _enriched_iocs.get(v, {})
+                        ts = enriched.get("first_seen", "")
+                        ts_label = _relative_time(ts) if ts else "just now"
                         st.markdown(
+                            f'<div style="display:flex; align-items:baseline; gap:0.5rem;">'
                             f'<code style="font-size:0.85rem; color:#c9d1d9; '
-                            f'word-break:break-all;">{v}</code>',
+                            f'word-break:break-all;">{v}</code>'
+                            f'<span style="font-size:0.7rem; color:#484f58; '
+                            f'white-space:nowrap;">{ts_label}</span></div>',
                             unsafe_allow_html=True,
                         )
                     if len(values) > 10:
                         st.caption(f"+ {len(values) - 10} more")
+            st.caption("IOCs expire after 90 days")
 
         # ── Coverage Gaps (directly visible) ──────────────────────────────────
         gap_label = f"Coverage Gaps — {len(exact_gaps)} exact"

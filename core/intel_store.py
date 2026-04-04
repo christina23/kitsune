@@ -425,6 +425,8 @@ class RedisIntelStore(ThreatIntelStore):
         for key, data in zip(keys_list, all_data):
             if data:
                 results.append({"rule_id": key, **data})
+        # Sort by created_at descending (newest first)
+        results.sort(key=lambda r: float(r.get("created_at", 0)), reverse=True)
         return results
 
     def rules_exist_for_ioc_hash(self, ioc_hash: str) -> bool:

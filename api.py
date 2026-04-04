@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
@@ -925,7 +926,7 @@ _ASK_TOOLS = [
     },
     {
         "name": "search_rules",
-        "description": "Search for detection rules (Sigma/SPL). Can filter by actor or TTP.",
+        "description": "Search for detection rules (Sigma/SPL). Results are sorted by creation time (newest first). Each rule includes a created_at epoch timestamp. Can filter by actor or TTP.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -979,11 +980,22 @@ def _execute_ask_tool(store, tool_name: str, tool_input: dict) -> Any:
         )
 
     elif tool_name == "search_rules":
-        return store.query_rules(
+        rules = store.query_rules(
             actor=tool_input.get("actor"),
             ttp=tool_input.get("ttp"),
             limit=tool_input.get("limit", 25),
         )
+        # Convert epoch timestamps to human-readable for LLM summarization
+        for r in rules:
+            ts = r.get("created_at")
+            if ts:
+                try:
+                    r["created_at_human"] = datetime.fromtimestamp(float(ts)).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                except (ValueError, TypeError):
+                    pass
+        return rules
 
     elif tool_name == "get_coverage":
         raw = store.get_coverage_summary()
