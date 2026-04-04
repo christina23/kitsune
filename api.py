@@ -926,7 +926,7 @@ _ASK_TOOLS = [
     },
     {
         "name": "search_rules",
-        "description": "Search for detection rules (Sigma/SPL). Results are sorted by creation time (newest first). Each rule includes a created_at epoch timestamp. Can filter by actor or TTP.",
+        "description": "Search for detection rules (Sigma/SPL). Results are sorted by creation time (newest first). Each rule includes created_at (UTC datetime) and link (GitHub repo URL or source report URL). Can filter by actor or TTP.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -985,16 +985,35 @@ def _execute_ask_tool(store, tool_name: str, tool_input: dict) -> Any:
             ttp=tool_input.get("ttp"),
             limit=tool_input.get("limit", 25),
         )
-        # Convert epoch timestamps to human-readable for LLM summarization
+        # Resolve repo URL for building file links
+        repo_url = (BaselineRepoConfig.SIGMA_REPO_URL or "").rstrip("/").removesuffix(".git")
+        repo_branch = BaselineRepoConfig.SIGMA_REPO_BRANCH or "main"
+
         for r in rules:
+            # Convert epoch to human-readable UTC
             ts = r.get("created_at")
             if ts:
                 try:
-                    r["created_at_human"] = datetime.fromtimestamp(float(ts)).strftime(
-                        "%Y-%m-%d %H:%M"
+                    r["created_at"] = datetime.utcfromtimestamp(float(ts)).strftime(
+                        "%Y-%m-%d %H:%M UTC"
                     )
                 except (ValueError, TypeError):
                     pass
+
+            # Build link to rule source
+            source_file = r.get("source", "")  # baseline rules
+            source_url = r.get("source_url", "")  # pipeline rules
+            if source_file and repo_url:
+                # Baseline rule — link to file in repo
+                r["link"] = f"{repo_url}/blob/{repo_branch}/{source_file}"
+            elif source_url:
+                # Pipeline-generated rule — link to source report
+                r["link"] = source_url
+
+            # Drop bulky rule_content from AMA results
+            r.pop("rule_content", None)
+            r.pop("tlsh_hash", None)
+            r.pop("ioc_hash", None)
         return rules
 
     elif tool_name == "get_coverage":
@@ -1084,7 +1103,9 @@ def ask_query(req: AskRequest):
         max_tokens=1024,
         system=(
             "You are a threat intelligence analyst summarizing query results. "
-            "Be concise and direct. Use markdown tables or bullet points for structured data. "
+            "Be concise and direct. Use markdown tables for structured data. "
+            "For detection rules: always show Created (the created_at field as-is), "
+            "rule name, TTPs, and Link (as a markdown link if present). "
             "If the data is empty, say so clearly."
         ),
         tools=_ASK_TOOLS,

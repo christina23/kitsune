@@ -55,6 +55,7 @@ class DetectionRule(BaseModel):
     mitre_ttps: List[str]
     rule_content: str
     format: Literal["sigma", "spl"]
+    source_file: str = ""  # relative path in repo (baseline rules)
 
 
 class RuleOutput(BaseModel):

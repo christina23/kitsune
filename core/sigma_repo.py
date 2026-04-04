@@ -77,6 +77,11 @@ def _load_yml_dir(directory: Path) -> List[DetectionRule]:
             if data and isinstance(data, dict):
                 rule = _sigma_to_rule(data, raw)
                 if rule:
+                    # Store relative path for GitHub linking
+                    try:
+                        rule.source_file = str(yml.relative_to(directory))
+                    except ValueError:
+                        rule.source_file = yml.name
                     rules.append(rule)
         except Exception as exc:
             log.warning("Skipping %s: %s", yml, exc)
@@ -295,9 +300,9 @@ class BaselineSigmaRepo:
         Returns the number of rules synced.
         """
         synced = 0
-        source = self._local_path or self._repo_url or ""
         for rule in self._rules:
             try:
+                source = rule.source_file or self._local_path or self._repo_url or ""
                 store.ingest_baseline_rule(rule, source=source)
                 synced += 1
             except Exception as exc:
