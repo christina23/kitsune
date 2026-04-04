@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Literal, Optional
@@ -28,9 +29,9 @@ load_dotenv()
 # Allow running from repo root without installing the package
 sys.path.insert(0, os.path.dirname(__file__))
 from core.intel_store import create_store
-from core.models import DetectionRule
+from core.models import DetectionRule, RuleValidationResult
 from core.sigma_repo import initialize_baseline_repo, get_baseline_repo
-from core.config import BaselineRepoConfig, GitHubConfig
+from core.config import BaselineRepoConfig, GitHubConfig, RedisConfig
 
 _API_DESCRIPTION = """\
 Kitsune is a threat-intelligence pipeline that ingests reports, extracts IOCs
@@ -51,9 +52,14 @@ stores everything in Redis for search and analysis.
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize shared store once (singleton connection pool)
+    app.state.store = create_store()
     initialize_baseline_repo(
         local_path=BaselineRepoConfig.SIGMA_REPO_PATH,
         repo_url=BaselineRepoConfig.SIGMA_REPO_URL,
+        branch=BaselineRepoConfig.SIGMA_REPO_BRANCH,
+        token=BaselineRepoConfig.SIGMA_REPO_TOKEN,
+        store=app.state.store,
     )
     yield
 
@@ -468,10 +474,11 @@ class AnalyzeStartResponse(BaseModel):
 
 class TaskStatusResponse(BaseModel):
     task_id: str
-    status: Literal["running", "done", "error"]
+    status: Literal["running", "done", "error", "pending_review"]
     step: Optional[str] = None
     result: Optional[AnalyzeResponse] = None
     error: Optional[str] = None
+    review_status: Optional[str] = None
 
 
 # ── In-memory task store ──────────────────────────────────────────────────────
@@ -487,11 +494,12 @@ def _set_task(task_id: str, **kwargs: Any) -> None:
         _tasks[task_id].update(kwargs)
 
 
-def _run_pipeline_task(task_id: str, req: "AnalyzeRequest") -> None:
+def _run_pipeline_task(task_id: str, req: "AnalyzeRequest", store=None) -> None:
     """Background thread: run the full pipeline and write results to _tasks."""
     try:
         _set_task(task_id, step="Loading store…")
-        store = create_store()
+        if store is None:
+            store = create_store()
 
         _set_task(task_id, step="Initialising agent…")
         from core.agent import ThreatDetectionAgent
@@ -508,6 +516,8 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest") -> None:
         _orig_coverage = agent._analyze_coverage
         _orig_spl = agent._generate_spl_rules
         _orig_sigma = agent._generate_sigma_rules
+        _orig_validate = agent._validate_rules
+        _orig_review = agent._await_review
 
         def _traced(fn, label):
             def _wrapper(state):
@@ -520,6 +530,8 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest") -> None:
         agent._analyze_coverage = _traced(_orig_coverage, "Phase 1 coverage analysis…")
         agent._generate_spl_rules = _traced(_orig_spl, "Generating SPL rules…")
         agent._generate_sigma_rules = _traced(_orig_sigma, "Generating Sigma rules…")
+        agent._validate_rules = _traced(_orig_validate, "Validating rules…")
+        agent._await_review = _traced(_orig_review, "Awaiting review…")
         # Rebuild workflow with the patched methods
         agent.workflow = agent._create_workflow()
         from langgraph.checkpoint.memory import MemorySaver
@@ -531,6 +543,7 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest") -> None:
         state = agent._last_state or {}
         intel = state.get("threat_intel")
         gaps = state.get("coverage_gaps", [])
+        review_status = state.get("review_status")
 
         iocs = IOCSummary(**(intel.iocs.to_dict() if intel and intel.iocs else {}))
         rule_records = [
@@ -562,7 +575,20 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest") -> None:
             rules=rule_records,
             coverage_gaps=gap_records,
         )
-        _set_task(task_id, status="done", step="Complete", result=result.model_dump())
+
+        # Determine task status based on review
+        if review_status == "pending_review":
+            _set_task(
+                task_id,
+                status="pending_review",
+                step="Awaiting review",
+                result=result.model_dump(),
+                review_status="pending_review",
+                agent=agent,
+                validated_rules=state.get("validated_rules", []),
+            )
+        else:
+            _set_task(task_id, status="done", step="Complete", result=result.model_dump())
 
     except Exception as exc:
         _set_task(task_id, status="error", step="Failed", error=str(exc))
@@ -572,7 +598,8 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest") -> None:
 
 
 def get_store():
-    store = create_store()
+    # Prefer the shared store initialized in lifespan
+    store = getattr(app.state, "store", None) or create_store()
     if store is None:
         raise HTTPException(
             status_code=503,
@@ -706,9 +733,11 @@ def analyze_url(req: AnalyzeRequest):
             "step": "Queued",
             "result": None,
             "error": None,
+            "review_status": None,
         }
+    store = getattr(app.state, "store", None)
     thread = threading.Thread(
-        target=_run_pipeline_task, args=(task_id, req), daemon=True
+        target=_run_pipeline_task, args=(task_id, req, store), daemon=True
     )
     thread.start()
     return AnalyzeStartResponse(task_id=task_id)
@@ -729,7 +758,131 @@ def get_task_status(task_id: str):
         task = _tasks.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
-    return TaskStatusResponse(task_id=task_id, **task)
+    # Filter out internal fields not in the response model
+    response_fields = {
+        k: v for k, v in task.items()
+        if k in TaskStatusResponse.model_fields
+    }
+    return TaskStatusResponse(task_id=task_id, **response_fields)
+
+
+# ── Review workflow ──────────────────────────────────────────────────────────
+
+
+class ReviewRuleRecord(BaseModel):
+    name: str
+    format: str
+    rule_content: str
+    mitre_ttps: List[str] = []
+    verdict: str = "pass"
+    issues: List[str] = []
+
+
+class ReviewResponse(BaseModel):
+    task_id: str
+    review_status: str
+    rules: List[ReviewRuleRecord] = []
+
+
+class ReviewDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+    feedback: Optional[str] = None
+    rule_edits: Optional[Dict[str, str]] = None  # rule_name -> edited content
+
+
+class ReviewDecisionResponse(BaseModel):
+    task_id: str
+    decision: str
+    rules_ingested: int = 0
+
+
+@app.get("/tasks/{task_id}/review", response_model=ReviewResponse, tags=["Pipeline"])
+def get_review(task_id: str):
+    """
+    Get generated rules with validation verdicts for engineer review.
+
+    Only available when task status is `pending_review`.
+    Returns each rule with its validation verdict (pass/fail/needs_review)
+    and any issues found.
+    """
+    with _tasks_lock:
+        task = _tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+    if task.get("review_status") != "pending_review":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task is not awaiting review (status: {task.get('status')}).",
+        )
+
+    validated = task.get("validated_rules", [])
+    rules = []
+    for v in validated:
+        rule_data = v.get("rule", {})
+        rules.append(ReviewRuleRecord(
+            name=rule_data.get("name", ""),
+            format=rule_data.get("format", "sigma"),
+            rule_content=rule_data.get("rule_content", ""),
+            mitre_ttps=rule_data.get("mitre_ttps", []),
+            verdict=v.get("verdict", "pass"),
+            issues=v.get("issues", []),
+        ))
+
+    return ReviewResponse(
+        task_id=task_id,
+        review_status="pending_review",
+        rules=rules,
+    )
+
+
+@app.post("/tasks/{task_id}/review", response_model=ReviewDecisionResponse, tags=["Pipeline"])
+def submit_review(task_id: str, req: ReviewDecision):
+    """
+    Submit a review decision for generated rules.
+
+    - `approved` — rules are ingested to the store and become available for PR proposal
+    - `rejected` — rules are discarded
+
+    Optionally include `rule_edits` (mapping of rule name to edited content)
+    to modify rules before approval. Include `feedback` for audit trail.
+    """
+    with _tasks_lock:
+        task = _tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+    if task.get("review_status") != "pending_review":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task is not awaiting review (status: {task.get('status')}).",
+        )
+
+    agent = task.get("agent")
+    rules_ingested = 0
+
+    if agent:
+        state = agent.resume_after_review(
+            thread_id="",
+            decision=req.decision,
+            feedback=req.feedback,
+            rule_edits=req.rule_edits,
+        )
+        if state and req.decision == "approved":
+            rules_ingested = len(state.get("detection_rules", []))
+
+    # Update task status
+    new_status = "done" if req.decision == "approved" else "done"
+    _set_task(
+        task_id,
+        status=new_status,
+        step=f"Review: {req.decision}",
+        review_status=req.decision,
+    )
+
+    return ReviewDecisionResponse(
+        task_id=task_id,
+        decision=req.decision,
+        rules_ingested=rules_ingested,
+    )
 
 
 # ── AI Search ────────────────────────────────────────────────────────────────
@@ -853,6 +1006,7 @@ class BaselineStatsResponse(BaseModel):
 class ProposePRRequest(BaseModel):
     rule_ids: List[str]
     threat_actor: Optional[str] = None
+    task_id: Optional[str] = None  # link to reviewed task for audit trail
 
 
 class ProposePRResponse(BaseModel):
@@ -973,6 +1127,9 @@ def baseline_reload():
     repo = initialize_baseline_repo(
         local_path=BaselineRepoConfig.SIGMA_REPO_PATH,
         repo_url=BaselineRepoConfig.SIGMA_REPO_URL,
+        branch=BaselineRepoConfig.SIGMA_REPO_BRANCH,
+        token=BaselineRepoConfig.SIGMA_REPO_TOKEN,
+        store=getattr(app.state, "store", None),
     )
     return BaselineStatsResponse(
         rule_count=repo.rule_count,
@@ -1021,7 +1178,34 @@ def propose_pr(req: ProposePRRequest):
     if not rules_to_propose:
         raise HTTPException(status_code=404, detail="No rules found for the provided IDs.")
 
-    pr_url = gh.propose_rules(rules_to_propose, threat_actor=req.threat_actor)
+    # Build review summary for PR body if linked to a reviewed task
+    review_summary = None
+    if req.task_id:
+        with _tasks_lock:
+            task = _tasks.get(req.task_id)
+        if task and task.get("review_status") != "approved":
+            raise HTTPException(
+                status_code=400,
+                detail="Rules must be reviewed and approved before creating a PR.",
+            )
+        if task:
+            validated = task.get("validated_rules", [])
+            review_summary = {
+                "decision": "approved",
+                "reviewed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "validation_summary": {
+                    "passed": sum(1 for v in validated if v.get("verdict") == "pass"),
+                    "needs_review": sum(1 for v in validated if v.get("verdict") == "needs_review"),
+                    "failed": sum(1 for v in validated if v.get("verdict") == "fail"),
+                },
+            }
+
+    pr_url = gh.propose_rules(
+        rules_to_propose,
+        threat_actor=req.threat_actor,
+        review_approved=True,
+        review_summary=review_summary,
+    )
     return ProposePRResponse(pr_url=pr_url, rule_count=len(rules_to_propose))
 
 

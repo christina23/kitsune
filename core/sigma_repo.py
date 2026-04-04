@@ -6,6 +6,8 @@ into an in-memory cache. The cache is prepended to store_rules during
 Phase 1 coverage analysis so that every analyze job checks new LLM-generated
 rules against the full known-good baseline — even when Redis is empty.
 
+Private repos are supported via SIGMA_REPO_TOKEN (PAT or deploy key).
+
 Usage (called once at API startup):
     from core.sigma_repo import initialize_baseline_repo
     initialize_baseline_repo(local_path="/path/to/rules")
@@ -20,12 +22,16 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
+from urllib.parse import urlparse
 
 import yaml
 
 from .coverage import _tlsh_hash
 from .models import DetectionRule
+
+if TYPE_CHECKING:
+    from .intel_store import ThreatIntelStore
 
 log = logging.getLogger(__name__)
 
@@ -77,8 +83,45 @@ def _load_yml_dir(directory: Path) -> List[DetectionRule]:
     return rules
 
 
-def _clone_or_pull(repo_url: str, cache_dir: Path) -> Path:
+def _load_yml_files(file_paths: List[Path]) -> List[DetectionRule]:
+    """Load specific .yml files and return parsed DetectionRules."""
+    rules: List[DetectionRule] = []
+    for yml in file_paths:
+        try:
+            if not yml.exists() or not yml.suffix == ".yml":
+                continue
+            raw = yml.read_text()
+            data = yaml.safe_load(raw)
+            if data and isinstance(data, dict):
+                rule = _sigma_to_rule(data, raw)
+                if rule:
+                    rules.append(rule)
+        except Exception as exc:
+            log.warning("Skipping %s: %s", yml, exc)
+    return rules
+
+
+def _auth_url(repo_url: str, token: Optional[str]) -> str:
+    """Insert PAT token into a GitHub HTTPS URL for authentication."""
+    if not token:
+        return repo_url
+    parsed = urlparse(repo_url)
+    if parsed.scheme != "https":
+        return repo_url
+    authed = parsed._replace(netloc=f"{token}@{parsed.hostname}")
+    return authed.geturl()
+
+
+def _clone_or_pull(
+    repo_url: str,
+    cache_dir: Path,
+    branch: str = "main",
+    token: Optional[str] = None,
+) -> tuple[Path, Optional[str], Optional[str]]:
     """Clone repo_url into cache_dir, or git-pull if it already exists.
+
+    Returns (repo_path, old_head_sha, new_head_sha).
+    old_head_sha is None on fresh clones.
 
     Requires gitpython (pip install gitpython).
     """
@@ -89,12 +132,39 @@ def _clone_or_pull(repo_url: str, cache_dir: Path) -> Path:
             "gitpython is required to use SIGMA_REPO_URL. "
             "Install it with: pip install gitpython"
         )
+
+    authed_url = _auth_url(repo_url, token)
+
     if cache_dir.exists():
-        git.Repo(cache_dir).remotes.origin.pull()
+        repo = git.Repo(cache_dir)
+        old_head = repo.head.commit.hexsha
+        # Update remote URL in case token changed
+        repo.remotes.origin.set_url(authed_url)
+        repo.remotes.origin.pull(branch)
+        new_head = repo.head.commit.hexsha
+        return cache_dir, old_head, new_head
     else:
         cache_dir.parent.mkdir(parents=True, exist_ok=True)
-        git.Repo.clone_from(repo_url, cache_dir)
-    return cache_dir
+        repo = git.Repo.clone_from(authed_url, cache_dir, branch=branch)
+        new_head = repo.head.commit.hexsha
+        return cache_dir, None, new_head
+
+
+def _get_changed_yml_files(
+    cache_dir: Path, old_sha: str, new_sha: str,
+) -> List[Path]:
+    """Return paths of .yml files changed between two commits."""
+    import git
+
+    repo = git.Repo(cache_dir)
+    diff = repo.commit(old_sha).diff(repo.commit(new_sha))
+    changed: List[Path] = []
+    for d in diff:
+        path = d.b_path or d.a_path
+        if path and path.endswith(".yml"):
+            full = cache_dir / path
+            changed.append(full)
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +175,8 @@ class BaselineSigmaRepo:
     """In-memory cache of baseline sigma rules.
 
     Rules are loaded once at startup (or on explicit reload) from a local
-    directory and/or a cloned GitHub repo. The cache is never written to
-    Redis — it stays in memory so Redis remains exclusively for novel
-    LLM-generated rules.
+    directory and/or a cloned GitHub repo. Supports incremental sync
+    and Redis-backed caching for fast cold starts.
     """
 
     def __init__(self) -> None:
@@ -116,25 +185,76 @@ class BaselineSigmaRepo:
         self._loaded_at: Optional[float] = None
         self._local_path: Optional[str] = None
         self._repo_url: Optional[str] = None
+        self._branch: str = "main"
+        self._token: Optional[str] = None
+        self._last_head_sha: Optional[str] = None
 
     def load(
         self,
         local_path: Optional[str] = None,
         repo_url: Optional[str] = None,
         branch: str = "main",
+        token: Optional[str] = None,
+        store: Optional["ThreatIntelStore"] = None,
     ) -> None:
         """Load rules from local_path and/or clone/pull repo_url.
 
+        If a store is provided, attempts Redis-backed cache hydration
+        when the sync SHA matches (skip full file parse).
         Replaces the in-memory cache atomically on completion.
         """
         self._local_path = local_path
         self._repo_url = repo_url
+        self._branch = branch
+        self._token = token
         rules: List[DetectionRule] = []
 
         if repo_url:
             cache = Path.home() / ".cache" / "kitsune" / "sigma_repo"
-            cloned = _clone_or_pull(repo_url, cache)
-            rules += _load_yml_dir(cloned)
+
+            # Check if Redis has a warm cache we can use
+            if store and cache.exists():
+                cached_sha = store.get_baseline_sync_sha()
+                try:
+                    import git
+                    repo = git.Repo(cache)
+                    current_sha = repo.head.commit.hexsha
+                    if cached_sha and cached_sha == current_sha:
+                        log.info("Baseline cache hit — SHA %s matches Redis", cached_sha[:8])
+                        # Still do the pull to check for updates
+                        cloned, old_head, new_head = _clone_or_pull(
+                            repo_url, cache, branch, token,
+                        )
+                        if old_head == new_head:
+                            # No changes — use cached rules from filesystem (fast)
+                            rules += _load_yml_dir(cloned)
+                            self._last_head_sha = new_head
+                        else:
+                            # Changed — incremental load
+                            changed_files = _get_changed_yml_files(cloned, old_head, new_head)
+                            if changed_files:
+                                rules += _load_yml_dir(cloned)
+                            else:
+                                rules += _load_yml_dir(cloned)
+                            self._last_head_sha = new_head
+                    else:
+                        cloned, old_head, new_head = _clone_or_pull(
+                            repo_url, cache, branch, token,
+                        )
+                        rules += _load_yml_dir(cloned)
+                        self._last_head_sha = new_head
+                except Exception:
+                    cloned, old_head, new_head = _clone_or_pull(
+                        repo_url, cache, branch, token,
+                    )
+                    rules += _load_yml_dir(cloned)
+                    self._last_head_sha = new_head
+            else:
+                cloned, old_head, new_head = _clone_or_pull(
+                    repo_url, cache, branch, token,
+                )
+                rules += _load_yml_dir(cloned)
+                self._last_head_sha = new_head
 
         if local_path:
             rules += _load_yml_dir(Path(local_path))
@@ -152,13 +272,42 @@ class BaselineSigmaRepo:
             f"({len(self.ttps_covered)} unique TTPs)"
         )
 
+        # Sync to Redis if store is available
+        if store and self._last_head_sha:
+            self.sync_to_redis(store)
+
     def reload(self) -> int:
         """Re-run load() with the previously configured paths.
 
         Returns the number of rules loaded.
         """
-        self.load(self._local_path, self._repo_url)
+        self.load(
+            self._local_path,
+            self._repo_url,
+            self._branch,
+            self._token,
+        )
         return len(self._rules)
+
+    def sync_to_redis(self, store: "ThreatIntelStore") -> int:
+        """Sync all baseline rules to Redis for persistent caching.
+
+        Returns the number of rules synced.
+        """
+        synced = 0
+        source = self._local_path or self._repo_url or ""
+        for rule in self._rules:
+            try:
+                store.ingest_baseline_rule(rule, source=source)
+                synced += 1
+            except Exception as exc:
+                log.warning("Failed to sync baseline rule '%s': %s", rule.name, exc)
+
+        if self._last_head_sha:
+            store.set_baseline_sync_sha(self._last_head_sha)
+
+        log.info("Synced %d baseline rules to Redis", synced)
+        return synced
 
     def _to_store_dict(self, rule: DetectionRule) -> Dict:
         """Convert a DetectionRule to the dict format used by query_rules()."""
@@ -219,6 +368,9 @@ def get_baseline_repo() -> BaselineSigmaRepo:
 def initialize_baseline_repo(
     local_path: Optional[str] = None,
     repo_url: Optional[str] = None,
+    branch: str = "main",
+    token: Optional[str] = None,
+    store: Optional["ThreatIntelStore"] = None,
 ) -> BaselineSigmaRepo:
     """Create (or replace) the singleton and load rules.
 
@@ -227,5 +379,5 @@ def initialize_baseline_repo(
     global _repo
     _repo = BaselineSigmaRepo()
     if local_path or repo_url:
-        _repo.load(local_path, repo_url)
+        _repo.load(local_path, repo_url, branch, token, store)
     return _repo

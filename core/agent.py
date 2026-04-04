@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .intel_store import ThreatIntelStore
 from pathlib import Path
 
+import yaml as _yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -27,6 +28,7 @@ from .models import (
     RuleOutput,
     RulesBundle,
     CoverageGap,
+    RuleValidationResult,
 )
 from .config import Settings
 from .llm_factory import LLMFactory
@@ -88,6 +90,29 @@ def _filter_baseline_duplicates(
         else:
             novel.append(rule)
     return novel
+
+
+# ── Rule format config ─────────────────────────────────────────────────────
+
+_RULE_GENERATOR_CONFIG = {
+    "sigma": {
+        "prompt_template": SIGMA_GENERATION_PROMPT,
+        "system_message": (
+            "You are a threat detection expert"
+            " specializing in Sigma rule development"
+            " for enterprise security operations."
+        ),
+    },
+    "spl": {
+        "prompt_template": SPL_GENERATION_PROMPT,
+        "system_message": (
+            "You are a principal detection engineer"
+            " with deep expertise in threat hunting"
+            " and Splunk SPL. Create sophisticated,"
+            " context-aware detection rules."
+        ),
+    },
+}
 
 
 class ThreatDetectionAgent:
@@ -217,8 +242,8 @@ class ThreatDetectionAgent:
     def _create_workflow(self) -> StateGraph:
         """Create the LangGraph workflow.
 
-        Order: fetch → extract → analyze_coverage (Phase 1, vs store) →
-               generate_rules (Phase 2 coverage update inline) → END
+        Order: fetch → extract → analyze_coverage (Phase 1) →
+               generate_rules → validate_rules → await_review → END
         """
         workflow = StateGraph(AgentState)
         workflow.add_node("fetch_content", self._fetch_content)
@@ -226,6 +251,8 @@ class ThreatDetectionAgent:
         workflow.add_node("analyze_coverage", self._analyze_coverage)
         workflow.add_node("generate_sigma_rules", self._generate_sigma_rules)
         workflow.add_node("generate_spl_rules", self._generate_spl_rules)
+        workflow.add_node("validate_rules", self._validate_rules)
+        workflow.add_node("await_review", self._await_review)
         workflow.set_entry_point("fetch_content")
         workflow.add_edge("fetch_content", "extract_threat_intel")
         workflow.add_edge("extract_threat_intel", "analyze_coverage")
@@ -238,8 +265,10 @@ class ThreatDetectionAgent:
                 "end": END,
             },
         )
-        workflow.add_edge("generate_sigma_rules", END)
-        workflow.add_edge("generate_spl_rules", END)
+        workflow.add_edge("generate_sigma_rules", "validate_rules")
+        workflow.add_edge("generate_spl_rules", "validate_rules")
+        workflow.add_edge("validate_rules", "await_review")
+        workflow.add_edge("await_review", END)
         return workflow
 
     def _fetch_content(self, state: AgentState) -> AgentState:
@@ -258,6 +287,7 @@ class ThreatDetectionAgent:
             print(f"Fetched {len(relevant_content)} characters from URL")
         except Exception as e:
             state["error"] = f"Failed to fetch content: {str(e)}"
+            state.setdefault("errors", []).append(f"fetch: {e}")
             state["content"] = ""
         return state
 
@@ -334,6 +364,7 @@ class ThreatDetectionAgent:
         except Exception as e:
             print(f"Threat intel extraction failed: {str(e)}")
             state["error"] = f"Failed to extract threat intelligence: {str(e)}"
+            state.setdefault("errors", []).append(f"extract: {e}")
             state["threat_intel"] = None
 
         return state
@@ -350,7 +381,11 @@ class ThreatDetectionAgent:
             "coverage_gaps": [],
             "rule_format": rule_format,
             "error": None,
+            "errors": [],
             "_store_rules_cache": [],
+            "validated_rules": [],
+            "review_status": None,
+            "review_feedback": None,
         }
         import uuid as _uuid
         config = {
@@ -369,6 +404,63 @@ class ThreatDetectionAgent:
             print(f"Workflow execution failed: {str(e)}")
             return []
 
+    def resume_after_review(
+        self,
+        thread_id: str,
+        decision: Literal["approved", "rejected"],
+        feedback: Optional[str] = None,
+        rule_edits: Optional[Dict[str, str]] = None,
+    ) -> Optional[AgentState]:
+        """Resume the pipeline after a review decision.
+
+        If approved, ingests rules to store. If rule_edits provided,
+        updates rule content before proceeding.
+        Returns the updated state, or None on error.
+        """
+        if not self._last_state:
+            return None
+
+        state = self._last_state
+        state["review_status"] = decision
+        state["review_feedback"] = feedback
+
+        if decision == "approved":
+            # Apply rule edits if provided
+            if rule_edits:
+                for rule in state.get("detection_rules", []):
+                    if rule.name in rule_edits:
+                        rule.rule_content = rule_edits[rule.name]
+
+            # Ingest approved rules to store
+            if self.store and state.get("detection_rules"):
+                actor = (
+                    (state["threat_intel"].threat_actor or "")
+                    if state.get("threat_intel")
+                    else ""
+                )
+                ioc_hash = ""
+                intel = state.get("threat_intel")
+                if intel and intel.iocs and not intel.iocs.is_empty():
+                    ioc_hash = _compute_ioc_hash(intel.iocs)
+
+                novel = _filter_baseline_duplicates(
+                    state["detection_rules"],
+                    state.get("_store_rules_cache", []),
+                )
+                if novel:
+                    try:
+                        self.store.ingest_rules(
+                            novel,
+                            source_url=state["url"],
+                            threat_actor=actor,
+                            ioc_hash=ioc_hash,
+                        )
+                    except Exception as store_err:
+                        print(f"[store] Rule ingest failed: {store_err}")
+
+        self._last_state = state
+        return state
+
     def format_rule_output(self, rule: DetectionRule) -> str:
         """Format a detection rule for output"""
         if rule.format == "spl":
@@ -384,8 +476,18 @@ class ThreatDetectionAgent:
         else:
             return rule.rule_content
 
-    def _generate_spl_rules(self, state: AgentState) -> AgentState:
-        """Generate Splunk SPL detection rules"""
+    # ── Consolidated rule generation ─────────────────────────────────────────
+
+    def _generate_rules(
+        self,
+        state: AgentState,
+        rule_format: Literal["sigma", "spl"],
+    ) -> AgentState:
+        """Generate detection rules in the specified format.
+
+        Shared logic for both sigma and spl generation — IOC dedup check,
+        LLM call, finalization, Phase 2 coverage update, and store ingest.
+        """
         if not state.get("threat_intel"):
             state["detection_rules"] = []
             state["error"] = (
@@ -395,6 +497,7 @@ class ThreatDetectionAgent:
 
         intel = state["threat_intel"]
         author = determine_author(state["url"], intel.threat_actor)
+        config = _RULE_GENERATOR_CONFIG[rule_format]
 
         # IOC dedup check: skip generation if rules for this IOC set already exist
         ioc_hash = (
@@ -405,12 +508,14 @@ class ThreatDetectionAgent:
         if ioc_hash and self.store and self.store.rules_exist_for_ioc_hash(ioc_hash):
             existing = self.store.get_rules_by_ioc_hash(ioc_hash)
             import json as _json
-            # Only reuse cached rules if they match the requested format
-            matching = [r for r in existing if r.get("format", "spl") == "spl" and r.get("rule_content")]
+            matching = [
+                r for r in existing
+                if r.get("format", rule_format) == rule_format and r.get("rule_content")
+            ]
             if matching:
                 print(
                     f"[store] Rules exist for IOC set ({ioc_hash[:8]}…),"
-                    " skipping SPL generation"
+                    f" skipping {rule_format.upper()} generation"
                 )
                 state["detection_rules"] = [
                     DetectionRule(
@@ -420,14 +525,14 @@ class ThreatDetectionAgent:
                         references=[],
                         mitre_ttps=_json.loads(r.get("ttps", "[]")),
                         rule_content=r.get("rule_content", ""),
-                        format="spl",
+                        format=rule_format,
                     )
                     for r in matching
                 ]
                 self._phase2_coverage_update(state)
                 return state
 
-        prompt_content = SPL_GENERATION_PROMPT.format(
+        prompt_content = config["prompt_template"].format(
             threat_actor=intel.threat_actor or "Unknown",
             campaign_name=intel.campaign_name or "N/A",
             mitre_ttps=", ".join(
@@ -446,14 +551,7 @@ class ThreatDetectionAgent:
 
         prompt = ChatPromptTemplate.from_messages(
             [
-                SystemMessage(
-                    content=(
-                        "You are a principal detection engineer"
-                        " with deep expertise in threat hunting"
-                        " and Splunk SPL. Create sophisticated,"
-                        " context-aware detection rules."
-                    )
-                ),
+                SystemMessage(content=config["system_message"]),
                 HumanMessage(content=prompt_content),
             ]
         )
@@ -466,167 +564,122 @@ class ThreatDetectionAgent:
             rules_list = bundle_data.get("rules", [])
             state["detection_rules"] = self._finalize_rules(
                 rules_list,
-                rule_format="spl",
+                rule_format=rule_format,
                 reference=state["url"],
                 author=author,
             )
-            print(f"Generated {len(state['detection_rules'])} SPL rules")
+            print(f"Generated {len(state['detection_rules'])} {rule_format.upper()} rules")
 
             # Phase 2: update coverage gaps with the new rules
             self._phase2_coverage_update(state)
 
-            if self.store and state.get("detection_rules"):
-                actor = (
-                    (state["threat_intel"].threat_actor or "")
-                    if state.get("threat_intel")
-                    else ""
-                )
-                novel = _filter_baseline_duplicates(
-                    state["detection_rules"],
-                    state.get("_store_rules_cache", []),
-                )
-                if novel:
-                    try:
-                        self.store.ingest_rules(
-                            novel,
-                            source_url=state["url"],
-                            threat_actor=actor,
-                            ioc_hash=ioc_hash,
-                        )
-                    except Exception as store_err:
-                        print(
-                            f"[store] Rule ingest failed (non-fatal): {store_err}"
-                        )
-                else:
-                    print("[store] All generated rules duplicated baseline; skipping ingest")
-
         except Exception as e:
-            print(f"SPL rule generation failed: {str(e)}")
-            state["error"] = f"Failed to generate SPL rules: {str(e)}"
+            print(f"{rule_format.upper()} rule generation failed: {str(e)}")
+            state["error"] = f"Failed to generate {rule_format.upper()} rules: {str(e)}"
+            state.setdefault("errors", []).append(f"generate_{rule_format}: {e}")
             state["detection_rules"] = []
+
         return state
+
+    def _generate_spl_rules(self, state: AgentState) -> AgentState:
+        """Generate Splunk SPL detection rules"""
+        return self._generate_rules(state, "spl")
 
     def _generate_sigma_rules(self, state: AgentState) -> AgentState:
         """Generate Sigma detection rules"""
-        if not state.get("threat_intel"):
-            state["detection_rules"] = []
-            state["error"] = (
-                "No threat intelligence available for rule generation"
-            )
-            return state
+        return self._generate_rules(state, "sigma")
 
-        intel = state["threat_intel"]
-        author = determine_author(state["url"], intel.threat_actor)
+    # ── Validation node ──────────────────────────────────────────────────────
 
-        # IOC dedup check: skip generation if rules for this IOC set already exist
-        ioc_hash = (
-            _compute_ioc_hash(intel.iocs)
-            if intel.iocs and not intel.iocs.is_empty()
-            else ""
-        )
-        if ioc_hash and self.store and self.store.rules_exist_for_ioc_hash(ioc_hash):
-            existing = self.store.get_rules_by_ioc_hash(ioc_hash)
-            import json as _json
-            # Only reuse cached rules if they match the requested format
-            matching = [r for r in existing if r.get("format", "sigma") == "sigma" and r.get("rule_content")]
-            if matching:
-                print(
-                    f"[store] Rules exist for IOC set ({ioc_hash[:8]}…),"
-                    " skipping Sigma generation"
-                )
-                state["detection_rules"] = [
-                    DetectionRule(
-                        name=r["name"],
-                        description="(retrieved from store)",
-                        author="",
-                        references=[],
-                        mitre_ttps=_json.loads(r.get("ttps", "[]")),
-                        rule_content=r.get("rule_content", ""),
-                        format="sigma",
+    def _validate_rules(self, state: AgentState) -> AgentState:
+        """Validate generated rules before review.
+
+        Performs:
+        - YAML parse check for sigma rules (title, logsource, detection)
+        - TTP consistency: rule TTPs should match extracted threat intel
+        - Content safety check against forbidden terms
+        """
+        rules = state.get("detection_rules", [])
+        intel = state.get("threat_intel")
+        intel_ttps = set()
+        if intel and intel.techniques:
+            intel_ttps = {t.id.upper() for t in intel.techniques}
+
+        validated: List[dict] = []
+
+        for rule in rules:
+            issues: List[str] = []
+
+            # YAML structure check (sigma rules only)
+            if rule.format == "sigma":
+                try:
+                    parsed = _yaml.safe_load(rule.rule_content)
+                    if not isinstance(parsed, dict):
+                        issues.append("Rule content is not valid YAML dict")
+                    else:
+                        for required_key in ("title", "logsource", "detection"):
+                            if required_key not in parsed:
+                                issues.append(f"Missing required sigma key: {required_key}")
+                except _yaml.YAMLError as exc:
+                    issues.append(f"YAML parse error: {exc}")
+
+            # TTP consistency: rule's claimed TTPs should overlap with intel
+            if intel_ttps and rule.mitre_ttps:
+                rule_ttps = {t.upper() for t in rule.mitre_ttps}
+                if not rule_ttps & intel_ttps:
+                    issues.append(
+                        f"Rule TTPs {rule.mitre_ttps} do not overlap with "
+                        f"extracted intel TTPs"
                     )
-                    for r in matching
-                ]
-                self._phase2_coverage_update(state)
-                return state
 
-        prompt_content = SIGMA_GENERATION_PROMPT.format(
-            threat_actor=intel.threat_actor or "Unknown",
-            campaign_name=intel.campaign_name or "N/A",
-            mitre_ttps=", ".join(
-                f"{t.id}({t.tactic})" for t in intel.techniques
-            ),
-            attack_description=intel.attack_description,
-            key_behaviors=", ".join(intel.key_behaviors or []),
-            targeted_systems=", ".join(intel.targeted_systems or []),
-            iocs=intel.iocs.to_dict() if intel.iocs else {},
-            json_format_section=(
-                JSON_FORMAT_INSTRUCTIONS_ANTHROPIC
-                if self.llm_provider == "anthropic"
-                else ""
-            ),
-        )
+            # Content safety check
+            content_lower = rule.rule_content.lower()
+            for term in Settings.FORBIDDEN_TERMS:
+                if term.lower() in content_lower:
+                    issues.append(f"Contains forbidden term: '{term}'")
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                SystemMessage(
-                    content=(
-                        "You are a threat detection expert"
-                        " specializing in Sigma rule development"
-                        " for enterprise security operations."
-                    )
-                ),
-                HumanMessage(content=prompt_content),
-            ]
-        )
+            # Determine verdict
+            if any("YAML parse error" in i or "not valid YAML" in i for i in issues):
+                verdict = "fail"
+            elif issues:
+                verdict = "needs_review"
+            else:
+                verdict = "pass"
 
-        try:
-            bundle_data = self._get_valid_json_response(
-                prompt, expected_keys=["rules"], max_retries=3
+            validated.append(
+                RuleValidationResult(
+                    rule=rule, verdict=verdict, issues=issues,
+                ).model_dump()
             )
 
-            rules_list = bundle_data.get("rules", [])
-            state["detection_rules"] = self._finalize_rules(
-                rules_list,
-                rule_format="sigma",
-                reference=state["url"],
-                author=author,
-            )
-            print(f"Generated {len(state['detection_rules'])} Sigma rules")
+        state["validated_rules"] = validated
 
-            # Phase 2: update coverage gaps with the new rules
-            self._phase2_coverage_update(state)
-
-            if self.store and state.get("detection_rules"):
-                actor = (
-                    (state["threat_intel"].threat_actor or "")
-                    if state.get("threat_intel")
-                    else ""
-                )
-                novel = _filter_baseline_duplicates(
-                    state["detection_rules"],
-                    state.get("_store_rules_cache", []),
-                )
-                if novel:
-                    try:
-                        self.store.ingest_rules(
-                            novel,
-                            source_url=state["url"],
-                            threat_actor=actor,
-                            ioc_hash=ioc_hash,
-                        )
-                    except Exception as store_err:
-                        print(
-                            f"[store] Rule ingest failed (non-fatal): {store_err}"
-                        )
-                else:
-                    print("[store] All generated rules duplicated baseline; skipping ingest")
-
-        except Exception as e:
-            print(f"Sigma rule generation failed: {str(e)}")
-            state["error"] = f"Failed to generate Sigma rules: {str(e)}"
-            state["detection_rules"] = []
+        # Summary
+        pass_count = sum(1 for v in validated if v["verdict"] == "pass")
+        review_count = sum(1 for v in validated if v["verdict"] == "needs_review")
+        fail_count = sum(1 for v in validated if v["verdict"] == "fail")
+        print(
+            f"[VALIDATE] {len(validated)} rules: "
+            f"{pass_count} passed, {review_count} needs review, {fail_count} failed"
+        )
 
         return state
+
+    # ── Review node ──────────────────────────────────────────────────────────
+
+    def _await_review(self, state: AgentState) -> AgentState:
+        """Set review_status to pending_review. Pipeline pauses here.
+
+        The API or CLI will resume after an engineer reviews the rules.
+        """
+        if state.get("detection_rules"):
+            state["review_status"] = "pending_review"
+        else:
+            # Nothing to review — skip
+            state["review_status"] = None
+        return state
+
+    # ── Coverage analysis ────────────────────────────────────────────────────
 
     def _analyze_coverage(self, state: AgentState) -> AgentState:
         """Phase 1 coverage: compare extracted techniques vs store rules with TLSH."""

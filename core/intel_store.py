@@ -110,6 +110,30 @@ class ThreatIntelStore(ABC):
         """Update rule_content for a stored rule. Returns False if not found."""
 
     @abstractmethod
+    def is_ttp_covered(self, ttp_id: str) -> bool:
+        """Return True if at least one rule covers this TTP (O(1) lookup)."""
+
+    @abstractmethod
+    def get_all_tlsh_hashes(self) -> Dict[str, str]:
+        """Return mapping of rule_key → tlsh_hash for all rules (baseline + generated)."""
+
+    @abstractmethod
+    def ingest_baseline_rule(self, rule: "DetectionRule", source: str = "") -> str:
+        """Persist a baseline sigma rule and update all indexes. Returns the rule key."""
+
+    @abstractmethod
+    def get_baseline_stats(self) -> Dict[str, Any]:
+        """Return baseline stats: rule_count, ttps_covered, last_sync_ts, last_sync_sha."""
+
+    @abstractmethod
+    def get_baseline_sync_sha(self) -> Optional[str]:
+        """Return the last commit SHA that was synced, or None."""
+
+    @abstractmethod
+    def set_baseline_sync_sha(self, sha: str) -> None:
+        """Store the commit SHA after a successful sync."""
+
+    @abstractmethod
     def flush(self) -> int:
         """Delete all keys belonging to this store's prefix. Returns count of deleted keys."""
 
@@ -120,11 +144,21 @@ class ThreatIntelStore(ABC):
 class RedisIntelStore(ThreatIntelStore):
     """Redis-backed implementation of ThreatIntelStore."""
 
-    def __init__(self, redis_url: str, key_prefix: str = "kitsune"):
+    def __init__(
+        self,
+        redis_url: str,
+        key_prefix: str = "kitsune",
+        max_connections: int = 20,
+        default_ttl_days: int = 90,
+    ):
         import redis  # lazy import — missing package won't break module load
 
-        self._r = redis.from_url(redis_url, decode_responses=True)
+        pool = redis.ConnectionPool.from_url(
+            redis_url, max_connections=max_connections, decode_responses=True,
+        )
+        self._r = redis.Redis(connection_pool=pool)
         self._p = key_prefix
+        self._ioc_ttl = default_ttl_days * 86400  # seconds
 
     # ── Key helpers ───────────────────────────────────────────────────────────
 
@@ -164,6 +198,21 @@ class RedisIntelStore(ThreatIntelStore):
     def _ioc_hash_rule_idx(self, ioc_hash: str) -> str:
         return f"{self._p}:idx:ioc_hash:{ioc_hash}:rules"
 
+    def _covered_ttps_key(self) -> str:
+        return f"{self._p}:covered_ttps"
+
+    def _tlsh_all_key(self) -> str:
+        return f"{self._p}:tlsh:all"
+
+    def _baseline_key(self, uid: str) -> str:
+        return f"{self._p}:baseline:{uid}"
+
+    def _baseline_sync_key(self) -> str:
+        return f"{self._p}:baseline:sync"
+
+    def _baseline_rules_set_key(self) -> str:
+        return f"{self._p}:idx:baseline:rules"
+
     # ── Ingestion ─────────────────────────────────────────────────────────────
 
     def _ingest_single_ioc(
@@ -178,28 +227,35 @@ class RedisIntelStore(ThreatIntelStore):
         key = self._ioc_key(ioc_type, value)
         now = str(time.time())
 
+        # Batch: set core fields + read existing JSON fields in one pipeline
         pipe = self._r.pipeline()
         pipe.hsetnx(key, "first_seen", now)
         pipe.hset(
             key,
             mapping={"type": ioc_type, "value": value, "last_seen": now},
         )
-        pipe.execute()
+        # Read existing JSON merge fields
+        for field_name in ("threat_actors", "campaigns", "ttps", "source_urls"):
+            pipe.hget(key, field_name)
+        results = pipe.execute()
 
-        # Merge JSON arrays
-        for field_name, new_items in [
-            ("threat_actors", actors),
-            ("campaigns", campaigns),
-            ("ttps", ttps),
-            ("source_urls", [source_url]),
-        ]:
-            existing = self._r.hget(key, field_name)
-            self._r.hset(
-                key, field_name, _merge_json_list(existing, new_items)
-            )
+        # Results: [hsetnx, hset, hget_actors, hget_campaigns, hget_ttps, hget_urls]
+        existing_actors = results[2]
+        existing_campaigns = results[3]
+        existing_ttps = results[4]
+        existing_urls = results[5]
 
-        # Indexes and timeline
+        # Batch: write merged JSON fields + indexes in one pipeline
         pipe = self._r.pipeline()
+        pipe.hset(key, mapping={
+            "threat_actors": _merge_json_list(existing_actors, actors),
+            "campaigns": _merge_json_list(existing_campaigns, campaigns),
+            "ttps": _merge_json_list(existing_ttps, ttps),
+            "source_urls": _merge_json_list(existing_urls, [source_url]),
+        })
+        # TTL for IOC records
+        if self._ioc_ttl > 0:
+            pipe.expire(key, self._ioc_ttl)
         for actor in actors:
             pipe.sadd(self._actor_ioc_idx(actor), key)
         for ttp_id in ttps:
@@ -207,10 +263,9 @@ class RedisIntelStore(ThreatIntelStore):
             pipe.zincrby(self._trend_key(), 1, ttp_id)
         pipe.zadd(self._timeline_key(), {key: float(now)})
         pipe.set(self._lookup_key(value), key)
-        pipe.execute()
-
         if actors:
-            self._r.sadd(self._actors_key(), *actors)
+            pipe.sadd(self._actors_key(), *actors)
+        pipe.execute()
 
     def ingest_threat_intel(
         self, threat_intel: ThreatIntelligence, source_url: str
@@ -242,26 +297,36 @@ class RedisIntelStore(ThreatIntelStore):
         # Remove stale rules from a previous run of this same URL
         old_rule_keys = self._r.smembers(src_key)
         if old_rule_keys:
-            pipe = self._r.pipeline()
-            for old_key in old_rule_keys:
-                old_data = self._r.hgetall(old_key)
+            # Batch read all old rule data in one pipeline
+            read_pipe = self._r.pipeline()
+            old_keys_list = list(old_rule_keys)
+            for old_key in old_keys_list:
+                read_pipe.hgetall(old_key)
+            old_data_list = read_pipe.execute()
+
+            # Batch cleanup in one pipeline
+            cleanup_pipe = self._r.pipeline()
+            for old_key, old_data in zip(old_keys_list, old_data_list):
                 if old_data:
                     old_actor = old_data.get("threat_actor", "")
                     old_ttps = json.loads(old_data.get("ttps", "[]"))
                     old_ioc_hash = old_data.get("ioc_hash", "")
                     if old_actor:
-                        pipe.srem(self._actor_rule_idx(old_actor), old_key)
+                        cleanup_pipe.srem(self._actor_rule_idx(old_actor), old_key)
                     for ttp_id in old_ttps:
-                        pipe.srem(self._ttp_rule_idx(ttp_id), old_key)
+                        cleanup_pipe.srem(self._ttp_rule_idx(ttp_id), old_key)
                     if old_ioc_hash:
-                        pipe.srem(self._ioc_hash_rule_idx(old_ioc_hash), old_key)
-                pipe.delete(old_key)
-            pipe.delete(src_key)
-            pipe.execute()
+                        cleanup_pipe.srem(self._ioc_hash_rule_idx(old_ioc_hash), old_key)
+                cleanup_pipe.delete(old_key)
+            cleanup_pipe.delete(src_key)
+            cleanup_pipe.execute()
 
+        # Batch write all new rules in one pipeline
+        write_pipe = self._r.pipeline()
         for rule in rules:
             key = self._rule_key(rule.name, rule.rule_content)
-            self._r.hset(
+            tlsh_hash = _compute_tlsh_safe(rule.rule_content)
+            write_pipe.hset(
                 key,
                 mapping={
                     "name": rule.name,
@@ -271,19 +336,21 @@ class RedisIntelStore(ThreatIntelStore):
                     "source_url": source_url,
                     "created_at": str(time.time()),
                     "rule_content": rule.rule_content,
-                    "tlsh_hash": _compute_tlsh_safe(rule.rule_content),
+                    "tlsh_hash": tlsh_hash,
                     "ioc_hash": ioc_hash,
                 },
             )
-            pipe = self._r.pipeline()
             if threat_actor:
-                pipe.sadd(self._actor_rule_idx(threat_actor), key)
+                write_pipe.sadd(self._actor_rule_idx(threat_actor), key)
             for ttp_id in rule.mitre_ttps:
-                pipe.sadd(self._ttp_rule_idx(ttp_id), key)
-            pipe.sadd(src_key, key)
+                write_pipe.sadd(self._ttp_rule_idx(ttp_id), key)
+                write_pipe.sadd(self._covered_ttps_key(), ttp_id.upper())
+            write_pipe.sadd(src_key, key)
             if ioc_hash:
-                pipe.sadd(self._ioc_hash_rule_idx(ioc_hash), key)
-            pipe.execute()
+                write_pipe.sadd(self._ioc_hash_rule_idx(ioc_hash), key)
+            if tlsh_hash:
+                write_pipe.hset(self._tlsh_all_key(), key, tlsh_hash)
+        write_pipe.execute()
 
     # ── Querying ──────────────────────────────────────────────────────────────
 
@@ -305,9 +372,18 @@ class RedisIntelStore(ThreatIntelStore):
         else:
             keys = self._r.zrevrange(self._timeline_key(), 0, limit - 1)
 
+        keys_list = list(keys)[:limit]
+        if not keys_list:
+            return []
+
+        # Batch fetch all hashes in one pipeline
+        pipe = self._r.pipeline()
+        for key in keys_list:
+            pipe.hgetall(key)
+        all_data = pipe.execute()
+
         results = []
-        for key in list(keys)[:limit]:
-            data = self._r.hgetall(key)
+        for data in all_data:
             if not data:
                 continue
             if ioc_type and data.get("type") != ioc_type:
@@ -333,9 +409,18 @@ class RedisIntelStore(ThreatIntelStore):
             # Scan for all rule keys
             keys = list(self._r.scan_iter(f"{self._p}:rule:*"))
 
+        keys_list = list(keys)[:limit]
+        if not keys_list:
+            return []
+
+        # Batch fetch all hashes in one pipeline
+        pipe = self._r.pipeline()
+        for key in keys_list:
+            pipe.hgetall(key)
+        all_data = pipe.execute()
+
         results = []
-        for key in list(keys)[:limit]:
-            data = self._r.hgetall(key)
+        for key, data in zip(keys_list, all_data):
             if data:
                 results.append({"rule_id": key, **data})
         return results
@@ -345,23 +430,101 @@ class RedisIntelStore(ThreatIntelStore):
 
     def get_rules_by_ioc_hash(self, ioc_hash: str, limit: int = 50) -> List[Dict]:
         keys = list(self._r.smembers(self._ioc_hash_rule_idx(ioc_hash)))[:limit]
+        if not keys:
+            return []
+
+        pipe = self._r.pipeline()
+        for k in keys:
+            pipe.hgetall(k)
+        all_data = pipe.execute()
+
         return [
             {"rule_id": k, **d}
-            for k in keys
-            if (d := self._r.hgetall(k))
+            for k, d in zip(keys, all_data)
+            if d
         ]
 
     def update_rule(self, rule_id: str, new_content: str) -> bool:
         if not self._r.exists(rule_id):
             return False
-        self._r.hset(
+        tlsh_hash = _compute_tlsh_safe(new_content)
+        pipe = self._r.pipeline()
+        pipe.hset(
             rule_id,
             mapping={
                 "rule_content": new_content,
-                "tlsh_hash": _compute_tlsh_safe(new_content),
+                "tlsh_hash": tlsh_hash,
             },
         )
+        if tlsh_hash:
+            pipe.hset(self._tlsh_all_key(), rule_id, tlsh_hash)
+        pipe.execute()
         return True
+
+    # ── TTP coverage (O(1) lookup) ───────────────────────────────────────────
+
+    def is_ttp_covered(self, ttp_id: str) -> bool:
+        return self._r.sismember(self._covered_ttps_key(), ttp_id.upper())
+
+    # ── TLSH hash map ────────────────────────────────────────────────────────
+
+    def get_all_tlsh_hashes(self) -> Dict[str, str]:
+        return self._r.hgetall(self._tlsh_all_key())
+
+    # ── Baseline rule management ─────────────────────────────────────────────
+
+    def ingest_baseline_rule(self, rule: "DetectionRule", source: str = "") -> str:
+        uid = _sha(rule.name + rule.rule_content)
+        key = self._baseline_key(uid)
+        tlsh_hash = _compute_tlsh_safe(rule.rule_content)
+
+        pipe = self._r.pipeline()
+        pipe.hset(
+            key,
+            mapping={
+                "name": rule.name,
+                "format": rule.format,
+                "ttps": json.dumps(rule.mitre_ttps),
+                "rule_content": rule.rule_content,
+                "source": source,
+                "tlsh_hash": tlsh_hash,
+                "created_at": str(time.time()),
+            },
+        )
+        pipe.sadd(self._baseline_rules_set_key(), key)
+        for ttp_id in rule.mitre_ttps:
+            pipe.sadd(self._covered_ttps_key(), ttp_id.upper())
+            pipe.sadd(self._ttp_rule_idx(ttp_id), key)
+        if tlsh_hash:
+            pipe.hset(self._tlsh_all_key(), key, tlsh_hash)
+        pipe.execute()
+        return key
+
+    def get_baseline_stats(self) -> Dict[str, Any]:
+        pipe = self._r.pipeline()
+        pipe.scard(self._baseline_rules_set_key())
+        pipe.smembers(self._covered_ttps_key())
+        pipe.hgetall(self._baseline_sync_key())
+        results = pipe.execute()
+
+        sync_data = results[2] or {}
+        return {
+            "rule_count": results[0],
+            "ttps_covered": sorted(results[1]),
+            "last_sync_ts": sync_data.get("ts"),
+            "last_sync_sha": sync_data.get("sha"),
+        }
+
+    def get_baseline_sync_sha(self) -> Optional[str]:
+        return self._r.hget(self._baseline_sync_key(), "sha")
+
+    def set_baseline_sync_sha(self, sha: str) -> None:
+        self._r.hset(
+            self._baseline_sync_key(),
+            mapping={"sha": sha, "ts": str(time.time())},
+        )
+
+    # ── Analytics ─────────────────────────────────────────────────────────────
 
     def get_coverage_summary(self) -> Dict[str, Dict]:
         summary: Dict[str, Dict] = {}
@@ -407,21 +570,28 @@ class RedisIntelStore(ThreatIntelStore):
         campaigns: List[str] = []
         ttps: List[str] = []
 
-        for key in ioc_keys:
-            data = self._r.hgetall(key)
-            if not data:
-                continue
-            ioc_type = data.get("type", "unknown")
-            ioc_counts[ioc_type] = ioc_counts.get(ioc_type, 0) + 1
-            campaigns += json.loads(data.get("campaigns", "[]"))
-            ttps += json.loads(data.get("ttps", "[]"))
+        ioc_keys_list = list(ioc_keys)
+        if ioc_keys_list:
+            # Batch fetch all IOC data
+            pipe = self._r.pipeline()
+            for key in ioc_keys_list:
+                pipe.hgetall(key)
+            all_data = pipe.execute()
+
+            for data in all_data:
+                if not data:
+                    continue
+                ioc_type = data.get("type", "unknown")
+                ioc_counts[ioc_type] = ioc_counts.get(ioc_type, 0) + 1
+                campaigns += json.loads(data.get("campaigns", "[]"))
+                ttps += json.loads(data.get("ttps", "[]"))
 
         rule_keys = self._r.smembers(self._actor_rule_idx(actor_name))
 
         return {
             "actor": actor_name,
             "ioc_counts": ioc_counts,
-            "total_iocs": len(ioc_keys),
+            "total_iocs": len(ioc_keys_list) if ioc_keys_list else 0,
             "total_rules": len(rule_keys),
             "ttps": list(dict.fromkeys(ttps)),
             "campaigns": list(dict.fromkeys(campaigns)),
@@ -429,6 +599,8 @@ class RedisIntelStore(ThreatIntelStore):
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
+
+_cached_store: Optional[ThreatIntelStore] = None
 
 
 def create_store(
@@ -439,7 +611,11 @@ def create_store(
     - REDIS_URL is not set and redis_url is not provided
     - the redis package is not installed
     - the Redis server is not reachable
+
+    Uses a module-level singleton so callers share a single connection pool.
     """
+    global _cached_store
+
     url = redis_url or __import__("os").getenv("REDIS_URL")
     if not url:
         warnings.warn(
@@ -448,9 +624,25 @@ def create_store(
         )
         return None
 
+    if _cached_store is not None:
+        try:
+            _cached_store._r.ping()
+            return _cached_store
+        except Exception:
+            _cached_store = None
+
     try:
-        store = RedisIntelStore(url)
+        from .config import RedisConfig
+
+        cfg = RedisConfig()
+        store = RedisIntelStore(
+            url,
+            key_prefix=cfg.key_prefix,
+            max_connections=cfg.max_connections,
+            default_ttl_days=cfg.default_ttl_days,
+        )
         store._r.ping()
+        _cached_store = store
         return store
     except ImportError:
         warnings.warn(

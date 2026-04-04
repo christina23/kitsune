@@ -20,9 +20,10 @@ from core.models import DetectionRule
 
 def _make_store() -> tuple[RedisIntelStore, MagicMock]:
     """Return a store with a fully-mocked Redis client."""
-    with patch("redis.from_url") as mock_from_url:
+    with patch("redis.ConnectionPool.from_url") as mock_pool, \
+         patch("redis.Redis") as mock_redis_cls:
         mock_redis = MagicMock()
-        mock_from_url.return_value = mock_redis
+        mock_redis_cls.return_value = mock_redis
         store = RedisIntelStore("redis://localhost:6379", key_prefix="test")
     return store, mock_redis
 
@@ -66,9 +67,10 @@ class TestFlush(unittest.TestCase):
         self.assertEqual(deleted, 0)
 
     def test_flush_uses_correct_prefix(self):
-        with patch("redis.from_url") as mock_from_url:
+        with patch("redis.ConnectionPool.from_url") as mock_pool, \
+             patch("redis.Redis") as mock_redis_cls:
             mock_redis = MagicMock()
-            mock_from_url.return_value = mock_redis
+            mock_redis_cls.return_value = mock_redis
             store = RedisIntelStore("redis://localhost:6379", key_prefix="kitsune")
 
         mock_redis.scan_iter.return_value = iter([])
@@ -99,13 +101,14 @@ class TestIngestRulesDeduplication(unittest.TestCase):
         rule = _rule()
         store.ingest_rules([rule], source_url="https://example.com/report1", threat_actor="APT28")
 
-        # hset was called to store the rule
-        mock_redis.hset.assert_called_once()
-        call_kwargs = mock_redis.hset.call_args
-        self.assertEqual(call_kwargs[1]["mapping"]["name"], "Test Rule")
+        # Write pipeline hset was called to store the rule
+        pipe = mock_redis.pipeline.return_value
+        hset_calls = [c for c in pipe.hset.call_args_list]
+        self.assertTrue(len(hset_calls) > 0, "Expected at least one hset call in pipeline")
+        stored_mapping = hset_calls[0][1]["mapping"]
+        self.assertEqual(stored_mapping["name"], "Test Rule")
 
         # pipeline sadd was called for the src tracking key
-        pipe = mock_redis.pipeline.return_value
         src_key = store._src_rules_key("https://example.com/report1")
         pipe.sadd.assert_any_call(src_key, unittest.mock.ANY)
 
@@ -113,26 +116,23 @@ class TestIngestRulesDeduplication(unittest.TestCase):
         """Re-submitting the same URL should purge old rules from indices."""
         store, mock_redis = _make_store()
         pipe = self._setup_pipe(mock_redis)
+        # read_pipe returns old rule data
+        pipe.execute.side_effect = [
+            [{"name": "Old Rule", "format": "sigma", "ttps": json.dumps(["T1021"]),
+              "threat_actor": "APT28", "source_url": "https://example.com/report1",
+              "created_at": "1000.0"}],  # read pipeline
+            None,  # cleanup pipeline
+            None,  # write pipeline
+        ]
 
         old_rule_key = "test:rule:oldkey123"
-        old_rule_data = {
-            "name": "Old Rule",
-            "format": "sigma",
-            "ttps": json.dumps(["T1021"]),
-            "threat_actor": "APT28",
-            "source_url": "https://example.com/report1",
-            "created_at": "1000.0",
-        }
-
         src_key = store._src_rules_key("https://example.com/report1")
-        # First smembers call returns the old rule key (src tracking set)
         mock_redis.smembers.return_value = {old_rule_key}
-        mock_redis.hgetall.return_value = old_rule_data
 
         rule = _rule(name="New Rule", content="new content", ttps=["T1059"])
         store.ingest_rules([rule], source_url="https://example.com/report1", threat_actor="APT28")
 
-        # Old rule hash should have been deleted
+        # Old rule hash should have been deleted (in cleanup pipeline)
         pipe.delete.assert_any_call(old_rule_key)
         # Src tracking set should have been cleared
         pipe.delete.assert_any_call(src_key)
@@ -143,36 +143,35 @@ class TestIngestRulesDeduplication(unittest.TestCase):
     def test_duplicate_url_stores_new_rule_after_cleanup(self):
         """After cleanup, the new rule should be written to Redis."""
         store, mock_redis = _make_store()
-        self._setup_pipe(mock_redis)
+        pipe = self._setup_pipe(mock_redis)
+        pipe.execute.side_effect = [
+            [{"name": "Old", "format": "sigma", "ttps": "[]",
+              "threat_actor": "", "source_url": "https://example.com/report1",
+              "created_at": "1.0"}],  # read pipeline
+            None,  # cleanup pipeline
+            None,  # write pipeline
+        ]
 
         mock_redis.smembers.return_value = {"test:rule:oldkey"}
-        mock_redis.hgetall.return_value = {
-            "name": "Old",
-            "format": "sigma",
-            "ttps": "[]",
-            "threat_actor": "",
-            "source_url": "https://example.com/report1",
-            "created_at": "1.0",
-        }
 
         rule = _rule(name="Fresh Rule", content="fresh content")
         store.ingest_rules([rule], source_url="https://example.com/report1", threat_actor="Lazarus")
 
-        mock_redis.hset.assert_called_once()
-        stored_mapping = mock_redis.hset.call_args[1]["mapping"]
-        self.assertEqual(stored_mapping["name"], "Fresh Rule")
+        # Check write pipeline hset call
+        hset_calls = [c for c in pipe.hset.call_args_list]
+        # Find the call that stores the actual rule (has "name" in mapping)
+        rule_hset = [c for c in hset_calls if c[1].get("mapping", {}).get("name") == "Fresh Rule"]
+        self.assertTrue(len(rule_hset) > 0, f"Expected hset for Fresh Rule, got: {hset_calls}")
+        stored_mapping = rule_hset[0][1]["mapping"]
         self.assertEqual(stored_mapping["threat_actor"], "Lazarus")
 
     def test_different_urls_do_not_interfere(self):
         """Rules from different URLs should coexist independently."""
         store, mock_redis = _make_store()
-        self._setup_pipe(mock_redis)
+        pipe = self._setup_pipe(mock_redis)
 
         # Simulate URL-A having an existing rule
-        url_a = "https://example.com/report-a"
         url_b = "https://example.com/report-b"
-
-        src_key_b = store._src_rules_key(url_b)
 
         # URL-B has no prior history
         mock_redis.smembers.return_value = set()
@@ -181,26 +180,30 @@ class TestIngestRulesDeduplication(unittest.TestCase):
         store.ingest_rules([rule_b], source_url=url_b, threat_actor="APT29")
 
         # No deletions should have happened (empty smembers for URL-B)
-        pipe = mock_redis.pipeline.return_value
-        pipe.delete.assert_not_called()  # cleanup pipeline never fired
+        pipe.delete.assert_not_called()
 
-        # Rule B was stored
-        mock_redis.hset.assert_called_once()
+        # Rule B was stored (in write pipeline)
+        hset_calls = [c for c in pipe.hset.call_args_list]
+        self.assertTrue(len(hset_calls) > 0)
 
     def test_missing_old_rule_hash_is_handled_gracefully(self):
         """If old rule key is in tracking set but hash is gone, no crash."""
         store, mock_redis = _make_store()
-        self._setup_pipe(mock_redis)
+        pipe = self._setup_pipe(mock_redis)
+        # read pipeline returns empty dict (ghost key)
+        pipe.execute.side_effect = [
+            [{}],  # read pipeline
+            None,  # cleanup pipeline
+            None,  # write pipeline
+        ]
 
         mock_redis.smembers.return_value = {"test:rule:ghost"}
-        mock_redis.hgetall.return_value = {}  # hash already deleted
 
         rule = _rule()
         # Should not raise
         store.ingest_rules([rule], source_url="https://example.com/report1", threat_actor="APT28")
 
         # Ghost key is still deleted
-        pipe = mock_redis.pipeline.return_value
         pipe.delete.assert_any_call("test:rule:ghost")
 
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, List, Optional
 
 from .config import GitHubConfig
@@ -37,6 +37,7 @@ def _rule_filename(rule: DetectionRule, actor: Optional[str] = None) -> str:
 def _build_pr_body(
     rules: List[DetectionRule],
     coverage_gap_context: Optional[List[Dict]],
+    review_summary: Optional[Dict] = None,
 ) -> str:
     lines = [
         "## Proposed sigma rules\n",
@@ -59,6 +60,23 @@ def _build_pr_body(
                 f"| {gap.get('technique_id','')} "
                 f"| {gap.get('priority','')} "
                 f"| {gap.get('reason','')} |"
+            )
+
+    if review_summary:
+        lines += [
+            "",
+            "## Review summary\n",
+            f"- **Decision:** {review_summary.get('decision', 'approved')}",
+            f"- **Reviewed at:** {review_summary.get('reviewed_at', datetime.now().isoformat())}",
+        ]
+        if review_summary.get("feedback"):
+            lines.append(f"- **Feedback:** {review_summary['feedback']}")
+        validation = review_summary.get("validation_summary")
+        if validation:
+            lines.append(
+                f"- **Validation:** {validation.get('passed', 0)} passed, "
+                f"{validation.get('needs_review', 0)} needs review, "
+                f"{validation.get('failed', 0)} failed"
             )
 
     lines += [
@@ -89,8 +107,23 @@ class GitHubPRClient:
         rules: List[DetectionRule],
         threat_actor: Optional[str] = None,
         coverage_gap_context: Optional[List[Dict]] = None,
+        review_approved: bool = False,
+        review_summary: Optional[Dict] = None,
     ) -> str:
-        """Create a branch, commit rule .yml files, open a PR. Returns the PR URL."""
+        """Create a branch, commit rule .yml files, open a draft PR.
+
+        Returns the PR URL.
+
+        Args:
+            review_approved: Must be True to proceed. Raises ValueError
+                if False, enforcing that rules have been reviewed.
+        """
+        if not review_approved:
+            raise ValueError(
+                "Cannot propose rules without review approval. "
+                "Set review_approved=True after the review step."
+            )
+
         today = date.today().strftime("%Y%m%d")
         actor_slug = _safe_branch_component(threat_actor or "unknown")
         content_hash = hashlib.sha256(
@@ -115,15 +148,16 @@ class GitHubPRClient:
                 branch=branch_name,
             )
 
-        # Open the PR
+        # Open as draft PR
         actor_label = threat_actor or "unknown actor"
         pr = self._repo.create_pull(
             title=f"kitsune: new sigma rules from {actor_label} ({date.today().isoformat()})",
-            body=_build_pr_body(rules, coverage_gap_context),
+            body=_build_pr_body(rules, coverage_gap_context, review_summary),
             head=branch_name,
             base=self._base_branch,
+            draft=True,
         )
-        log.info("PR created: %s", pr.html_url)
+        log.info("Draft PR created: %s", pr.html_url)
         return pr.html_url
 
     def get_merged_pr_rules(

@@ -397,6 +397,129 @@ def _poll_pipeline():
 
 _poll_pipeline()
 
+
+# ── Review Panel (fragment) ──────────────────────────────────────────────────
+
+
+@st.fragment
+def _poll_review():
+    """Poll for pending_review status and show the review panel."""
+    task_id = st.session_state.get("pipeline_task_id")
+    if not task_id:
+        return
+    task = _get(f"/tasks/{task_id}")
+    if not task:
+        return
+    if task.get("status") == "pending_review" or task.get("review_status") == "pending_review":
+        st.session_state["review_task_id"] = task_id
+        st.session_state["pipeline_task_id"] = None
+
+
+_poll_review()
+
+review_task_id = st.session_state.get("review_task_id")
+if review_task_id and not st.session_state.get("pipeline_result"):
+    review_data = _get(f"/tasks/{review_task_id}/review")
+    if review_data and review_data.get("rules"):
+        st.markdown(
+            '<div class="section-header">Review Generated Rules</div>',
+            unsafe_allow_html=True,
+        )
+        st.info(
+            f"**{len(review_data['rules'])} rule(s)** are awaiting your review. "
+            "Inspect each rule, optionally edit, then approve or reject."
+        )
+
+        # Show validation summary
+        verdicts = [r.get("verdict", "pass") for r in review_data["rules"]]
+        pass_count = verdicts.count("pass")
+        review_count = verdicts.count("needs_review")
+        fail_count = verdicts.count("fail")
+        v_cols = st.columns(3)
+        v_cols[0].metric("Passed", pass_count)
+        v_cols[1].metric("Needs Review", review_count)
+        v_cols[2].metric("Failed", fail_count)
+
+        # Show each rule for review
+        rule_edits: Dict[str, str] = {}
+        for i, rule in enumerate(review_data["rules"]):
+            verdict = rule.get("verdict", "pass")
+            issues = rule.get("issues", [])
+            badge_colors = {
+                "pass": ("#0f2d18", "#3fb950"),
+                "needs_review": ("#2d1b00", "#ffa657"),
+                "fail": ("#4a1010", "#ff7b7b"),
+            }
+            bg, fg = badge_colors.get(verdict, ("#21262d", "#8b949e"))
+            verdict_badge = _pill(verdict.upper(), bg, fg)
+
+            with st.expander(
+                f"[{rule.get('format', 'sigma').upper()}] {rule['name']} — {verdict}",
+                expanded=(verdict != "pass"),
+            ):
+                st.markdown(
+                    f"{verdict_badge} **{rule['name']}**",
+                    unsafe_allow_html=True,
+                )
+                if issues:
+                    for issue in issues:
+                        st.warning(issue)
+
+                ttps = rule.get("mitre_ttps", [])
+                if ttps:
+                    st.markdown(
+                        " ".join(_ttp_badge(t) for t in ttps[:6]),
+                        unsafe_allow_html=True,
+                    )
+
+                edited = st.text_area(
+                    "Rule content",
+                    value=rule.get("rule_content", ""),
+                    height=240,
+                    key=f"review_edit_{i}",
+                    label_visibility="collapsed",
+                )
+                if edited != rule.get("rule_content", ""):
+                    rule_edits[rule["name"]] = edited
+
+        # Review action buttons
+        st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
+        feedback = st.text_input(
+            "Feedback (optional)",
+            placeholder="Add notes for the audit trail…",
+            key="review_feedback",
+        )
+
+        btn_cols = st.columns([1, 1, 4])
+        with btn_cols[0]:
+            if st.button("Approve", type="primary", key="btn_approve", use_container_width=True):
+                payload: Dict[str, Any] = {"decision": "approved"}
+                if feedback:
+                    payload["feedback"] = feedback
+                if rule_edits:
+                    payload["rule_edits"] = rule_edits
+                resp = _post(f"/tasks/{review_task_id}/review", payload)
+                if resp:
+                    st.success(f"Approved {resp.get('rules_ingested', 0)} rules.")
+                    # Fetch the final result
+                    task = _get(f"/tasks/{review_task_id}")
+                    if task and task.get("result"):
+                        st.session_state["pipeline_result"] = task["result"]
+                    st.session_state["review_task_id"] = None
+                    st.rerun()
+
+        with btn_cols[1]:
+            if st.button("Reject", key="btn_reject", use_container_width=True):
+                payload = {"decision": "rejected"}
+                if feedback:
+                    payload["feedback"] = feedback
+                resp = _post(f"/tasks/{review_task_id}/review", payload)
+                if resp:
+                    st.warning("Rules rejected.")
+                    st.session_state["review_task_id"] = None
+                    st.rerun()
+
+
 # ── Main Content ──────────────────────────────────────────────────────────────
 
 pipeline_result = st.session_state.get("pipeline_result")

@@ -84,6 +84,12 @@ class RedisConfig:
     enabled: bool = field(
         default_factory=lambda: bool(os.getenv("REDIS_URL"))
     )
+    max_connections: int = field(
+        default_factory=lambda: int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))
+    )
+    default_ttl_days: int = field(
+        default_factory=lambda: int(os.getenv("REDIS_TTL_DAYS", "90"))
+    )
 
 
 class BaselineRepoConfig:
@@ -92,6 +98,7 @@ class BaselineRepoConfig:
     SIGMA_REPO_PATH: str | None = os.getenv("SIGMA_REPO_PATH")
     SIGMA_REPO_URL: str | None = os.getenv("SIGMA_REPO_URL")
     SIGMA_REPO_BRANCH: str = os.getenv("SIGMA_REPO_BRANCH", "main")
+    SIGMA_REPO_TOKEN: str | None = os.getenv("SIGMA_REPO_TOKEN")
 
 
 class GitHubConfig:

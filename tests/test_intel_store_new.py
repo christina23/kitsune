@@ -19,9 +19,10 @@ from core.models import DetectionRule
 # ---------------------------------------------------------------------------
 
 def _make_store() -> tuple[RedisIntelStore, MagicMock]:
-    with patch("redis.from_url") as mock_from_url:
+    with patch("redis.ConnectionPool.from_url") as mock_pool, \
+         patch("redis.Redis") as mock_redis_cls:
         mock_redis = MagicMock()
-        mock_from_url.return_value = mock_redis
+        mock_redis_cls.return_value = mock_redis
         store = RedisIntelStore("redis://localhost:6379", key_prefix="test")
     return store, mock_redis
 
@@ -59,12 +60,14 @@ class TestIocHashIndex(unittest.TestCase):
         store, mock_redis = _make_store()
         rule_key = "test:rule:aabbcc"
         mock_redis.smembers.return_value = {rule_key}
-        mock_redis.hgetall.return_value = {
+        pipe = MagicMock()
+        mock_redis.pipeline.return_value = pipe
+        pipe.execute.return_value = [{
             "name": "My Rule",
             "format": "sigma",
             "rule_content": "detection: ...",
             "ttps": json.dumps(["T1059"]),
-        }
+        }]
 
         results = store.get_rules_by_ioc_hash("abc123")
 
@@ -82,7 +85,9 @@ class TestIocHashIndex(unittest.TestCase):
         store, mock_redis = _make_store()
         keys = {f"test:rule:{i}" for i in range(10)}
         mock_redis.smembers.return_value = keys
-        mock_redis.hgetall.return_value = {"name": "R", "rule_content": "x"}
+        pipe = MagicMock()
+        mock_redis.pipeline.return_value = pipe
+        pipe.execute.return_value = [{"name": "R", "rule_content": "x"}] * 3
 
         results = store.get_rules_by_ioc_hash("abc123", limit=3)
         self.assertLessEqual(len(results), 3)
@@ -97,12 +102,14 @@ class TestUpdateRule(unittest.TestCase):
     def test_update_rule_returns_true_and_sets_fields(self):
         store, mock_redis = _make_store()
         mock_redis.exists.return_value = True
+        pipe = MagicMock()
+        mock_redis.pipeline.return_value = pipe
 
         result = store.update_rule("test:rule:abc", "new content here")
 
         self.assertTrue(result)
-        mock_redis.hset.assert_called_once()
-        mapping = mock_redis.hset.call_args[1]["mapping"]
+        pipe.hset.assert_called()
+        mapping = pipe.hset.call_args_list[0][1]["mapping"]
         self.assertEqual(mapping["rule_content"], "new content here")
         self.assertIn("tlsh_hash", mapping)
 
@@ -113,7 +120,7 @@ class TestUpdateRule(unittest.TestCase):
         result = store.update_rule("test:rule:missing", "content")
 
         self.assertFalse(result)
-        mock_redis.hset.assert_not_called()
+        mock_redis.pipeline.return_value.hset.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +136,18 @@ class TestIngestRulesNewFields(unittest.TestCase):
 
     def test_rule_content_and_tlsh_hash_stored(self):
         store, mock_redis = _make_store()
-        self._setup_pipe(mock_redis)
+        pipe = self._setup_pipe(mock_redis)
         mock_redis.smembers.return_value = set()
 
         store.ingest_rules([_rule(content="my spl search")], source_url="https://x.com", threat_actor="APT1")
 
-        mapping = mock_redis.hset.call_args[1]["mapping"]
+        # Rule is stored via write pipeline
+        hset_calls = [c for c in pipe.hset.call_args_list]
+        rule_calls = [c for c in hset_calls if c[1].get("mapping", {}).get("rule_content")]
+        self.assertTrue(len(rule_calls) > 0)
+        mapping = rule_calls[0][1]["mapping"]
         self.assertEqual(mapping["rule_content"], "my spl search")
-        self.assertIn("tlsh_hash", mapping)  # field present (may be empty if py-tlsh unavailable)
+        self.assertIn("tlsh_hash", mapping)
 
     def test_ioc_hash_index_created_when_provided(self):
         store, mock_redis = _make_store()
@@ -178,16 +189,18 @@ class TestQueryRulesRuleId(unittest.TestCase):
         rule_key = "test:rule:myrule"
 
         # Simulate scanning rules index
-        mock_redis.smembers.return_value = {rule_key}
         mock_redis.scan_iter.return_value = iter([rule_key])
-        mock_redis.hgetall.return_value = {
+        # Pipeline batch fetch
+        pipe = MagicMock()
+        mock_redis.pipeline.return_value = pipe
+        pipe.execute.return_value = [{
             "name": "My Rule",
             "format": "sigma",
             "ttps": "[]",
             "threat_actor": "APT1",
             "source_url": "https://x.com",
             "created_at": "1234.0",
-        }
+        }]
 
         results = store.query_rules(limit=10)
 
