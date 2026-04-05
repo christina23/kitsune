@@ -569,42 +569,12 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest", store=None) -> None:
 
         agent = ThreatDetectionAgent(llm_provider=req.llm_provider, store=store)
 
-        # The pipeline runs sequentially inside generate_detections.
-        # We update `step` at major milestones visible to the UI.
-        _set_task(task_id, step="Fetching & parsing URL…")
-
-        # Monkey-patch the agent's internal steps to surface progress
-        _orig_fetch = agent._fetch_content
-        _orig_extract = agent._extract_threat_intel
-        _orig_coverage = agent._analyze_coverage
-        _orig_spl = agent._generate_spl_rules
-        _orig_sigma = agent._generate_sigma_rules
-        _orig_validate = agent._validate_rules
-        _orig_review = agent._await_review
-
-        def _traced(fn, label):
-            def _wrapper(state):
-                _set_task(task_id, step=label)
-                return fn(state)
-            return _wrapper
-
-        agent._fetch_content = _traced(_orig_fetch, "Fetching URL content…")
-        agent._extract_threat_intel = _traced(_orig_extract, "Extracting IOCs & TTPs…")
-        agent._analyze_coverage = _traced(_orig_coverage, "Phase 1 coverage analysis…")
-        agent._generate_spl_rules = _traced(_orig_spl, "Generating SPL rules…")
-        agent._generate_sigma_rules = _traced(_orig_sigma, "Generating Sigma rules…")
-        agent._validate_rules = _traced(_orig_validate, "Validating rules…")
-        agent._await_review = _traced(_orig_review, "Awaiting review…")
-        # Rebuild workflow with the patched methods
-        agent.workflow = agent._create_workflow()
-        from langgraph.checkpoint.memory import MemorySaver
-        agent.app = agent.workflow.compile(checkpointer=MemorySaver())
-
         _set_task(task_id, step="Pipeline running…")
         rules = agent.generate_detections(
             req.url,
             req.rule_format,
             improvement_guidance=req.improvement_guidance,
+            step_callback=lambda label: _set_task(task_id, step=label),
         )
 
         state = agent._last_state or {}
