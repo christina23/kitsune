@@ -24,6 +24,8 @@ from .models import DetectionRule
 
 log = logging.getLogger(__name__)
 
+KITSUNE_PR_LABEL = "kitsune-generated"
+
 
 @lru_cache(maxsize=1)
 def get_github_author_name() -> Optional[str]:
@@ -161,12 +163,12 @@ class GitHubPRClient:
         # Create the branch
         self._repo.create_git_ref(f"refs/heads/{branch_name}", base_sha)
 
-        # Commit each rule file
+        # Commit each rule file (conventional-commits style)
         for rule in rules:
             path = _rule_filename(rule, threat_actor)
             self._repo.create_file(
                 path=path,
-                message=f"kitsune: add {rule.name}",
+                message=f"feat(rules): add {rule.name}",
                 content=rule.rule_content,
                 branch=branch_name,
             )
@@ -174,28 +176,61 @@ class GitHubPRClient:
         # Open as draft PR
         actor_label = threat_actor or "unknown actor"
         pr = self._repo.create_pull(
-            title=f"kitsune: new sigma rules from {actor_label} ({date.today().isoformat()})",
+            title=(
+                f"Detection rules for {actor_label} "
+                f"({date.today().isoformat()})"
+            ),
             body=_build_pr_body(rules, coverage_gap_context, review_summary),
             head=branch_name,
             base=self._base_branch,
             draft=True,
         )
+        self._ensure_label_applied(pr, KITSUNE_PR_LABEL)
         log.info("Draft PR created: %s", pr.html_url)
         return pr.html_url
+
+    def _ensure_label_applied(self, pr, label_name: str) -> None:
+        """Apply `label_name` to `pr`, creating the repo label if missing."""
+        try:
+            pr.add_to_labels(label_name)
+            return
+        except Exception as e:
+            log.info(
+                "Label %r not present, creating: %s", label_name, e
+            )
+        try:
+            self._repo.create_label(
+                name=label_name,
+                color="8957e5",  # Kitsune purple
+                description="PR opened automatically by kitsune",
+            )
+            pr.add_to_labels(label_name)
+        except Exception as e:
+            log.warning(
+                "Could not apply label %r to PR #%s: %s",
+                label_name, pr.number, e,
+            )
 
     def get_merged_pr_rules(
         self, since_timestamp: Optional[float] = None
     ) -> List[DetectionRule]:
-        """Return DetectionRule objects extracted from merged kitsune: PRs.
+        """Return DetectionRule objects from merged kitsune-authored PRs.
 
-        Fetches all closed PRs with title prefix "kitsune:" and extracts
-        any .yml files from the merge commit.
+        Identifies kitsune PRs by the `kitsune-generated` label, with a
+        legacy fallback on the historical "kitsune:"/"[Kitsune]:" title
+        prefixes for PRs merged before labels were used.
         """
         rules: List[DetectionRule] = []
         pulls = self._repo.get_pulls(state="closed", base=self._base_branch)
 
         for pr in pulls:
-            if not pr.title.startswith("kitsune:"):
+            has_label = any(
+                lbl.name == KITSUNE_PR_LABEL for lbl in pr.labels
+            )
+            legacy_prefix = pr.title.startswith(
+                ("[Kitsune]:", "kitsune:")
+            )
+            if not (has_label or legacy_prefix):
                 continue
             if not pr.merged:
                 continue

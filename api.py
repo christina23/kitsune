@@ -10,6 +10,7 @@ Redoc:       http://localhost:8000/redoc
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -19,7 +20,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from urllib.parse import quote
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
@@ -31,7 +34,12 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(__file__))
 from core.intel_store import create_store
 from core.models import DetectionRule
-from core.sigma_repo import initialize_baseline_repo, get_baseline_repo
+from core.sigma_repo import (
+    MITRE_TACTICS,
+    get_baseline_repo,
+    initialize_baseline_repo,
+)
+from core.mitre_tactics import tactics_for as _tactics_for_ttp
 from core.config import BaselineRepoConfig, GitHubConfig
 
 _API_DESCRIPTION = """\
@@ -681,6 +689,40 @@ def health_check():
     return {"status": "ok", "redis": redis_status}
 
 
+@app.get("/stats", tags=["Analytics"])
+def store_stats():
+    """Aggregate counts for the store — distinct IOCs, actors, and rules.
+
+    `rules_sigma` is the number of rules that live in the kitsune-sigma
+    repo (baseline rules loaded from SIGMA_REPO_URL plus rules synced
+    back from merged PRs). `rules_ai_generated` is the subset that
+    carries the `kitsune.generated` tag — i.e., authored by kitsune.
+    """
+    store = get_store()
+    all_rules = store.query_rules(limit=100000)
+
+    rules_sigma = 0
+    rules_ai = 0
+    for r in all_rules:
+        rid = r.get("rule_id") or ""
+        src_url = r.get("source_url") or ""
+        in_kitsune_sigma = (
+            ":baseline:" in rid or src_url.startswith("github:")
+        )
+        if not in_kitsune_sigma:
+            continue
+        rules_sigma += 1
+        if "kitsune.generated" in (r.get("rule_content") or ""):
+            rules_ai += 1
+
+    return {
+        "iocs": store.count_iocs(),
+        "actors": len(store._r.smembers(store._actors_key())),
+        "rules_sigma": rules_sigma,
+        "rules_ai_generated": rules_ai,
+    }
+
+
 @app.get("/actors", response_model=List[str], tags=["Actors"])
 def list_actors():
     """
@@ -767,6 +809,164 @@ def coverage_summary():
     store = get_store()
     raw = store.get_coverage_summary()
     return [{"ttp_id": ttp_id, **data} for ttp_id, data in sorted(raw.items())]
+
+
+def _build_coverage_matrix() -> Dict[str, Any]:
+    """Merge baseline-repo tactic data with store coverage.
+
+    Returns a structure with per-tactic rollups, flat technique list
+    with tactics attached, and totals.
+    """
+    store = get_store()
+    store_cov = store.get_coverage_summary()  # {ttp: {has_iocs, has_rules, ioc_count, rule_count}}
+    baseline_cov = get_baseline_repo().technique_coverage()  # {ttp: {rule_count, tactics}}
+
+    # Union of all TTPs we know about, with merged fields.
+    all_ttps = set(store_cov) | set(baseline_cov)
+    techniques: List[Dict[str, Any]] = []
+    for ttp in sorted(all_ttps):
+        s = store_cov.get(ttp, {})
+        b = baseline_cov.get(ttp, {})
+        # Prefer tactics from sigma tags; fall back to MITRE lookup.
+        tactics = b.get("tactics") or _tactics_for_ttp(ttp)
+        techniques.append({
+            "ttp_id": ttp,
+            "tactics": tactics,
+            "rule_count": int(s.get("rule_count", 0) or b.get("rule_count", 0) or 0),
+            "ioc_count": int(s.get("ioc_count", 0) or 0),
+            "has_rules": bool(s.get("has_rules") or b.get("rule_count", 0)),
+            "has_iocs": bool(s.get("has_iocs")),
+        })
+
+    # Per-tactic rollups
+    by_tactic: Dict[str, Dict[str, Any]] = {
+        t: {
+            "tactic": t,
+            "covered": 0,
+            "total_tracked": 0,
+            "uncovered_with_iocs": [],
+        }
+        for t in MITRE_TACTICS
+    }
+    # "unknown" bucket for techniques without a tactic tag
+    by_tactic["unknown"] = {
+        "tactic": "unknown",
+        "covered": 0,
+        "total_tracked": 0,
+        "uncovered_with_iocs": [],
+    }
+
+    for t in techniques:
+        tactics = t["tactics"] or ["unknown"]
+        for tac in tactics:
+            if tac not in by_tactic:
+                continue
+            by_tactic[tac]["total_tracked"] += 1
+            if t["has_rules"]:
+                by_tactic[tac]["covered"] += 1
+            if t["has_iocs"] and not t["has_rules"]:
+                by_tactic[tac]["uncovered_with_iocs"].append({
+                    "ttp_id": t["ttp_id"],
+                    "ioc_count": t["ioc_count"],
+                })
+
+    totals = {
+        "with_rules": sum(1 for t in techniques if t["has_rules"]),
+        "iocs_only": sum(
+            1 for t in techniques if t["has_iocs"] and not t["has_rules"]
+        ),
+        "uncovered": sum(
+            1 for t in techniques
+            if not t["has_rules"] and not t["has_iocs"]
+        ),
+        "total_tracked": len(techniques),
+    }
+
+    return {
+        "techniques": techniques,
+        "by_tactic": [
+            v for v in by_tactic.values() if v["total_tracked"] > 0
+        ],
+        "totals": totals,
+    }
+
+
+@app.get("/coverage/by-tactic", tags=["Analytics"])
+def coverage_by_tactic():
+    """Per-MITRE-tactic coverage rollup with uncovered gap TTPs."""
+    return _build_coverage_matrix()
+
+
+@app.get("/coverage/navigator", tags=["Analytics"])
+def coverage_navigator_layer():
+    """
+    Return a MITRE ATT&CK Navigator layer JSON describing current coverage.
+
+    Open in Navigator via:
+      https://mitre-attack.github.io/attack-navigator/#layerURL={this-url}
+    """
+    matrix = _build_coverage_matrix()
+    max_rules = max((t["rule_count"] for t in matrix["techniques"]), default=1) or 1
+
+    nav_techniques: List[Dict[str, Any]] = []
+    for t in matrix["techniques"]:
+        if t["has_rules"]:
+            nav_techniques.append({
+                "techniqueID": t["ttp_id"],
+                "score": t["rule_count"],
+                "comment": (
+                    f"{t['rule_count']} rule(s)"
+                    + (f", {t['ioc_count']} IOCs" if t["ioc_count"] else "")
+                ),
+                "enabled": True,
+            })
+        elif t["has_iocs"]:
+            # Gap: IOCs observed, no rules. Flagged in a separate color band.
+            nav_techniques.append({
+                "techniqueID": t["ttp_id"],
+                "score": -1,
+                "color": "#f8bbd0",  # pastel coral/pink
+                "comment": f"GAP: {t['ioc_count']} IOCs, no rules",
+                "enabled": True,
+            })
+
+    return {
+        "name": "Kitsune Coverage",
+        "versions": {
+            "attack": "14",
+            "navigator": "4.9.1",
+            "layer": "4.5",
+        },
+        "domain": "enterprise-attack",
+        "sorting": 3,  # 3 = sort descending by technique score
+        "description": (
+            "Kitsune detection coverage heatmap. Green-shaded techniques "
+            "have rules (darker = more rules). Red techniques have IOCs "
+            "observed but no detection rule."
+        ),
+        "techniques": nav_techniques,
+        "gradient": {
+            # Sage → deep forest, widened for visible contrast across
+            # the skewed rule-count distribution.
+            "colors": ["#3d7a4f", "#1f5530", "#0f3520", "#07200f"],
+            "minValue": 1,
+            "maxValue": max_rules,
+        },
+        "legendItems": [
+            {"label": "Has detection rules", "color": "#1b4d2e"},
+            {"label": "Gap: IOCs, no rules", "color": "#f8bbd0"},
+        ],
+    }
+
+
+def _navigator_view_url(request: Request) -> str:
+    """Build a MITRE Navigator URL that auto-loads the layer from our API."""
+    base = str(request.base_url).rstrip("/")
+    layer_url = f"{base}/coverage/navigator"
+    return (
+        "https://mitre-attack.github.io/attack-navigator/#layerURL="
+        + quote(layer_url, safe="")
+    )
 
 
 @app.post("/analyze", response_model=AnalyzeStartResponse, tags=["Pipeline"])
@@ -1056,6 +1256,17 @@ _ASK_TOOLS = [
         "description": "Get the coverage matrix showing which MITRE ATT&CK techniques have IOCs and/or detection rules in the store.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "get_coverage_matrix",
+        "description": (
+            "Get the MITRE ATT&CK coverage heatmap broken down by tactic, "
+            "plus a link to view/download the full Navigator layer. Use "
+            "this for any query about the coverage matrix, heatmap, or "
+            "coverage visualization, OR for queries about the most "
+            "critical gaps / uncovered techniques."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 _ASK_SYSTEM = (
@@ -1066,7 +1277,10 @@ _ASK_SYSTEM = (
     "pipeline-generated rules. When the user asks about what rules exist, coverage, "
     "or rule counts, prefer get_coverage — it includes all rules (baseline + generated). "
     "Use search_rules only when the user wants to see specific rule content filtered by actor or TTP. "
-    "If the user asks about TTPs, techniques, or MITRE ATT&CK, prefer get_trending_ttps or get_coverage. "
+    "For queries about the coverage matrix, heatmap, visualization, or the "
+    "most critical gaps / uncovered techniques, use get_coverage_matrix. "
+    "If the user asks about TTPs, techniques, or MITRE ATT&CK generally, "
+    "prefer get_trending_ttps or get_coverage. "
     "If the user asks about actors or threat groups, prefer list_actors or get_actor_summary. "
     "For queries about recently created or newest rules, use search_rules with no filters — "
     "the results are ordered by recency. "
@@ -1074,7 +1288,9 @@ _ASK_SYSTEM = (
 )
 
 
-def _execute_ask_tool(store, tool_name: str, tool_input: dict) -> Any:
+def _execute_ask_tool(
+    store, tool_name: str, tool_input: dict, navigator_url: str = ""
+) -> Any:
     """Execute a tool call against the store and return raw data."""
     if tool_name == "list_actors":
         actors = store._r.smembers(store._actors_key())
@@ -1095,13 +1311,24 @@ def _execute_ask_tool(store, tool_name: str, tool_input: dict) -> Any:
         )
 
     elif tool_name == "search_rules":
+        from core.github_pr import _safe_branch_component
+
+        # Hard cap at 20 — avoids overlong tables in the AMA bubble.
         rules = store.query_rules(
             actor=tool_input.get("actor"),
             ttp=tool_input.get("ttp"),
-            limit=tool_input.get("limit", 25),
+            limit=min(tool_input.get("limit", 20) or 20, 20),
         )
-        # Resolve repo URL for building file links
-        repo_url = (BaselineRepoConfig.SIGMA_REPO_URL or "").rstrip("/").removesuffix(".git")
+        # Resolve repo URL for building file links. Normalize SSH form
+        # (git@github.com:owner/repo[.git]) to the HTTPS browse URL.
+        _raw_repo = (BaselineRepoConfig.SIGMA_REPO_URL or "").strip()
+        _ssh_match = re.match(
+            r"git@([^:]+):(.+?)(?:\.git)?/?$", _raw_repo
+        )
+        if _ssh_match:
+            repo_url = f"https://{_ssh_match.group(1)}/{_ssh_match.group(2)}"
+        else:
+            repo_url = _raw_repo.rstrip("/").removesuffix(".git")
         repo_branch = BaselineRepoConfig.SIGMA_REPO_BRANCH or "main"
 
         for r in rules:
@@ -1115,15 +1342,50 @@ def _execute_ask_tool(store, tool_name: str, tool_input: dict) -> Any:
                 except (ValueError, TypeError):
                     pass
 
-            # Build link to rule source
+            # Flatten ttps to a comma-separated string so the LLM renders
+            # "T1012, T1059" instead of the raw ["T1012","T1059"] JSON.
+            raw_ttps = r.get("ttps")
+            if isinstance(raw_ttps, str):
+                try:
+                    raw_ttps = json.loads(raw_ttps)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    raw_ttps = [raw_ttps]
+            if isinstance(raw_ttps, list):
+                r["ttps"] = ", ".join(str(t) for t in raw_ttps)
+            elif raw_ttps is None:
+                r["ttps"] = ""
+
             source_file = r.get("source", "")  # baseline rules
-            source_url = r.get("source_url", "")  # pipeline rules
+            source_url = r.get("source_url", "")  # pipeline/merged rules
+
+            # Build sigma-repo link for the rule name
+            rule_url = ""
             if source_file and repo_url:
                 # Baseline rule — link to file in repo
-                r["link"] = f"{repo_url}/blob/{repo_branch}/{source_file}"
-            elif source_url:
-                # Pipeline-generated rule — link to source report
-                r["link"] = source_url
+                rule_url = f"{repo_url}/blob/{repo_branch}/{source_file}"
+            elif source_url.startswith("github:") and repo_url:
+                # Merged-PR rule — reconstruct path from kitsune naming
+                # convention: rules/{actor_slug}/{name_slug}.yml
+                actor_slug = _safe_branch_component(
+                    r.get("threat_actor") or "kitsune"
+                )
+                name_slug = _safe_branch_component(r.get("name") or "")
+                if name_slug:
+                    rule_url = (
+                        f"{repo_url}/blob/{repo_branch}/"
+                        f"rules/{actor_slug}/{name_slug}.yml"
+                    )
+
+            # Turn name into a markdown link when we have a repo URL
+            rule_name = r.get("name") or ""
+            if rule_url and rule_name:
+                r["name"] = f"[{rule_name}]({rule_url})"
+
+            # Report column: only set when source_url is a real http(s) URL
+            if source_url.startswith(("http://", "https://")):
+                r["report"] = f"[report]({source_url})"
+            else:
+                r["report"] = ""
 
             # Drop bulky rule_content from AMA results
             r.pop("rule_content", None)
@@ -1134,6 +1396,37 @@ def _execute_ask_tool(store, tool_name: str, tool_input: dict) -> Any:
     elif tool_name == "get_coverage":
         raw = store.get_coverage_summary()
         return [{"ttp_id": tid, **data} for tid, data in sorted(raw.items())]
+
+    elif tool_name == "get_coverage_matrix":
+        matrix = _build_coverage_matrix()
+        # Flatten by_tactic into a compact list the LLM can render as a table.
+        tactic_rows = []
+        all_gaps = []
+        for entry in matrix["by_tactic"]:
+            total = entry["total_tracked"]
+            covered = entry["covered"]
+            pct = round(100 * covered / total) if total else 0
+            tactic_rows.append({
+                "tactic": entry["tactic"],
+                "covered": covered,
+                "total": total,
+                "pct": pct,
+                "gap_count": len(entry["uncovered_with_iocs"]),
+            })
+            for g in entry["uncovered_with_iocs"]:
+                all_gaps.append({
+                    "tactic": entry["tactic"],
+                    "ttp_id": g["ttp_id"],
+                    "ioc_count": g["ioc_count"],
+                })
+        # Critical-first: highest IOC volume = most active threat with no rule.
+        all_gaps.sort(key=lambda g: (-g["ioc_count"], g["ttp_id"]))
+        return {
+            "totals": matrix["totals"],
+            "by_tactic": tactic_rows,
+            "critical_gaps": all_gaps[:15],
+            "navigator_url": navigator_url,
+        }
 
     return {"error": f"Unknown tool: {tool_name}"}
 
@@ -1173,7 +1466,7 @@ class GitHubSyncResponse(BaseModel):
 
 
 @app.post("/ask", response_model=AskResponse, tags=["Search"])
-def ask_query(req: AskRequest):
+def ask_query(req: AskRequest, request: Request):
     """
     Natural language search across the threat intel store.
 
@@ -1210,7 +1503,8 @@ def ask_query(req: AskRequest):
         return AskResponse(answer="I couldn't determine which data to look up. Try asking about TTPs, actors, IOCs, or detection rules.")
 
     # Step 2: Execute the tool against the store
-    data = _execute_ask_tool(store, tool_block.name, tool_block.input)
+    nav_url = _navigator_view_url(request)
+    data = _execute_ask_tool(store, tool_block.name, tool_block.input, nav_url)
 
     # Step 3: Send tool result back to LLM for a natural language summary
     summary_response = client.messages.create(
@@ -1218,10 +1512,54 @@ def ask_query(req: AskRequest):
         max_tokens=4096,
         system=(
             "You are a threat intelligence analyst summarizing query results. "
-            "Be concise and direct. Use markdown tables for structured data. "
-            "For detection rules: always show Created (the created_at field as-is), "
-            "rule name, TTPs, and Link (as a markdown link if present). "
-            "If the data is empty, say so clearly."
+            "Be concise and direct. "
+            "Formatting rules — you MUST follow these: "
+            "(1) For simple lists of strings (actors, TTP IDs, gaps, tags), "
+            "render as a markdown bullet list with one item per line "
+            "(e.g. `- UNC6748\\n- UNC6353`). Never comma-separate list items "
+            "on a single line. "
+            "(2) For structured data with multiple fields per row (rules, "
+            "IOCs, trending TTPs), use a markdown table. "
+            "(3) For detection rules tables: show columns Created "
+            "(created_at as-is), Name (use the name field verbatim — it "
+            "is already a markdown link when available), TTPs, and "
+            "Report (use the report field verbatim — already a markdown "
+            "link, or empty). Do NOT add any other columns. "
+            "(4) For coverage data (get_coverage): NEVER render the full "
+            "per-TTP list as a table. Output EXACTLY two blocks and "
+            "nothing else — no intro, no closing commentary, no repeated "
+            "lists, no technique descriptions: "
+            "(a) a single summary line of totals (e.g. `**142 techniques "
+            "tracked** — 98 ✅ with rules, 27 ⚠️ IOCs only, 17 ❌ "
+            "uncovered`), then "
+            "(b) a bullet list (max 10 items) of gaps where "
+            "`has_iocs=true` and `has_rules=false`, formatted as "
+            "`- ⚠️ T#### ({ioc_count} IOCs, no rules)`, one per line "
+            "with NO blank lines between bullets. If there are zero "
+            "gaps, omit block (b) entirely. Do NOT restate the gaps in "
+            "prose afterwards. "
+            "(5) For coverage matrix data (get_coverage_matrix): output "
+            "EXACTLY these blocks and nothing else — no intro paragraph, "
+            "no closing commentary, no repeated descriptions: "
+            "(a) one summary line of totals from `totals` "
+            "(e.g. `**{total_tracked} techniques tracked** — "
+            "{with_rules} ✅ with rules, {iocs_only} ⚠️ IOCs only, "
+            "{uncovered} ❌ uncovered`). "
+            "(b) a markdown table titled `**Coverage by tactic**` with "
+            "columns `Tactic | Covered | Gaps` where Covered shows "
+            "`{covered}/{total} ({pct}%)` and Gaps shows `gap_count` "
+            "(render as `—` when 0). Use rows from `by_tactic` in the "
+            "order given. Format the tactic name in Title Case "
+            "(e.g. `Credential Access`). "
+            "(c) a section `**Most critical gaps**` followed by a bullet "
+            "list from `critical_gaps` (up to 10 items), formatted as "
+            "`- ⚠️ **T####** — {tactic_title_case} ({ioc_count} IOCs, "
+            "no rules)`. One per line, no blank lines between. Skip this "
+            "block entirely if `critical_gaps` is empty. "
+            "(d) one final line: "
+            "`🗺️ [Open full heatmap in MITRE ATT&CK Navigator]"
+            "({navigator_url})`. "
+            "(6) If the data is empty, say so clearly."
         ),
         tools=_ASK_TOOLS,
         messages=[

@@ -183,6 +183,139 @@ def _put(endpoint: str, payload: Dict) -> Any:
         return None
 
 
+def _md_to_html(text: str) -> str:
+    """Minimal markdown-to-HTML for the /ask answer bubble.
+
+    Streamlit's markdown parser does not re-process markdown inside a
+    raw HTML `<div>`, so we convert the two constructs the summary LLM
+    is asked to emit — bullet lists and tables — into HTML inline.
+    Everything else is passed through with `\\n` → `<br>`.
+    """
+    if not text:
+        return ""
+    # Convert markdown links [text](url) → <a href="url">text</a> first,
+    # so they render inside table cells and plain text alike.
+    import re as _re_md
+    text = _re_md.sub(
+        r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+        r'<a href="\2" target="_blank" style="color:#79c0ff;">\1</a>',
+        text,
+    )
+    # Inline emphasis: **bold** and *italic* (bold first to avoid
+    # greedy single-asterisk matches eating the double-asterisk pair).
+    text = _re_md.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", text)
+    text = _re_md.sub(
+        r"(?<![*\w])\*([^*\n]+)\*(?!\w)", r"<em>\1</em>", text
+    )
+    # Inline `code`
+    text = _re_md.sub(
+        r"`([^`\n]+)`",
+        r'<code style="background:#21262d; padding:1px 5px; '
+        r'border-radius:4px; font-size:0.82em;">\1</code>',
+        text,
+    )
+    lines = text.split("\n")
+    out: List[str] = []
+    in_ul = False
+    in_table = False
+    table_header_seen = False
+
+    def _close_ul():
+        nonlocal in_ul
+        if in_ul:
+            out.append("</ul>")
+            in_ul = False
+
+    def _close_table():
+        nonlocal in_table, table_header_seen
+        if in_table:
+            out.append("</table>")
+            in_table = False
+            table_header_seen = False
+
+    table_style = (
+        "border-collapse:collapse; margin:0.4em 0; font-size:0.82rem;"
+    )
+    th_style = (
+        "text-align:left; padding:4px 10px; "
+        "border-bottom:1px solid #30363d; color:#8b949e; font-weight:600;"
+    )
+    td_style = (
+        "padding:4px 10px; border-bottom:1px solid #21262d; color:#c9d1d9;"
+    )
+
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.lstrip()
+        # Markdown table row (very simple detection)
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            # Skip the separator row (|---|---|)
+            if all(set(c) <= set("-: ") for c in cells) and cells:
+                table_header_seen = True
+                continue
+            _close_ul()
+            if not in_table:
+                out.append(f"<table style=\"{table_style}\">")
+                in_table = True
+            tag = "th" if not table_header_seen else "td"
+            style = th_style if tag == "th" else td_style
+            out.append(
+                "<tr>"
+                + "".join(f"<{tag} style=\"{style}\">{c}</{tag}>" for c in cells)
+                + "</tr>"
+            )
+            if tag == "th":
+                table_header_seen = True
+            continue
+        # Bullet list item
+        if stripped.startswith(("- ", "* ")):
+            _close_table()
+            if not in_ul:
+                out.append(
+                    "<ul style=\"margin:0.3em 0; padding-left:1.2em;\">"
+                )
+                in_ul = True
+            out.append(f"<li>{stripped[2:]}</li>")
+            continue
+        # Non-list, non-table line
+        _close_ul()
+        _close_table()
+        if line:
+            out.append(line)
+        else:
+            out.append("<br>")
+
+    _close_ul()
+    _close_table()
+    # Join with <br> between content lines. Skip only when adjacent to
+    # true block-level tags (ul/table) — inline tags like <strong>,
+    # <em>, <code>, <a> should still get line breaks between them.
+    _block_prefixes = ("<ul", "</ul", "<table", "</table", "<tr", "</tr")
+
+    def _is_block(piece: str) -> bool:
+        return piece.startswith(_block_prefixes)
+
+    html_parts: List[str] = []
+    for i, piece in enumerate(out):
+        html_parts.append(piece)
+        next_piece = out[i + 1] if i + 1 < len(out) else ""
+        if (
+            piece
+            and not _is_block(piece)
+            and next_piece
+            and not _is_block(next_piece)
+            and piece != "<br>"
+            and next_piece != "<br>"
+        ):
+            html_parts.append("<br>")
+    # Collapse runs of 2+ <br> into a single <br> to avoid double spacing
+    # when the LLM emits blank lines between bullets/paragraphs.
+    html = "".join(html_parts)
+    html = _re_md.sub(r"(?:<br>\s*){2,}", "<br>", html)
+    return html
+
+
 def _fmt_ts(ts: Optional[str]) -> str:
     if not ts:
         return "—"
@@ -780,44 +913,51 @@ else:
     actors = _load_actors()
     coverage = _load_coverage()
 
-    total_iocs = sum(e.get("ioc_count", 0) for e in coverage)
-    no_rules = sum(1 for e in coverage if not e.get("has_rules"))
+    # Aggregate counts from the API /stats endpoint.
+    _stats: Dict[str, int] = {}
+    try:
+        _stats_resp = requests.get(f"{API_URL}/stats", timeout=5)
+        _stats_resp.raise_for_status()
+        _stats = _stats_resp.json() or {}
+    except Exception:
+        pass
 
-    # Fetch rule count — only count rules synced back from merged PRs as "merged"
-    baseline_count = 0
-    merged_count = 0
+    total_iocs = int(_stats.get("iocs") or 0) or sum(
+        e.get("ioc_count", 0) for e in coverage
+    )
+    rules_sigma = int(_stats.get("rules_sigma") or 0)
+    rules_ai = int(_stats.get("rules_ai_generated") or 0)
+
+    # Still need merged_actors for the Actors Tracked delta.
     merged_actors: set = set()
     try:
-        _rules_resp = requests.get(f"{API_URL}/rules", params={"limit": 1000}, timeout=5)
+        _rules_resp = requests.get(
+            f"{API_URL}/rules", params={"limit": 1000}, timeout=5
+        )
         _rules_resp.raise_for_status()
         for r in _rules_resp.json() or []:
-            if ":baseline:" in (r.get("rule_id") or ""):
-                baseline_count += 1
-            elif (r.get("source_url") or "").startswith("github:"):
-                merged_count += 1
+            if (r.get("source_url") or "").startswith("github:"):
                 _a = (r.get("threat_actor") or "").strip()
                 if _a:
                     merged_actors.add(_a.lower())
     except Exception:
-        baseline_count = sum(e.get("rule_count", 0) for e in coverage)
+        pass
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     c1.metric(
         "Actors Tracked",
-        len(merged_actors),
+        len(actors),
         delta=f"+{len(merged_actors)} merged" if merged_actors else None,
     )
     c2.metric(
-        "IOCs in Store",
+        "IOCs Tracked",
         total_iocs,
-        delta=f"+{merged_count} merged" if merged_count else None,
     )
     c3.metric(
         "Detection Rules",
-        baseline_count + merged_count,
-        delta=f"+{merged_count} merged" if merged_count else None,
+        rules_sigma,
+        delta=f"{rules_ai} AI-generated" if rules_ai else None,
     )
-    c4.metric("Coverage Gaps", no_rules)
 
     st.markdown("<div style='height:1.2rem;'></div>", unsafe_allow_html=True)
 
@@ -837,7 +977,7 @@ else:
         "Recently created rules",
         "Newly added reports",
         "Which actors are tracked?",
-        "Any gaps in coverage?",
+        "Most critical TTP gaps",
     ]
 
     # CSS to style chip buttons
@@ -924,7 +1064,7 @@ div[data-testid="stHorizontalBlock"].chip-row button p {
         st.markdown(
             f'<div style="background:#161b22; border:1px solid #21262d; border-radius:2px 14px 14px 14px; '
             f'padding:14px 18px; margin:0.2rem 0 0.1rem; font-size:0.85rem; color:#c9d1d9; '
-            f'line-height:1.6;">{entry["answer"]}</div>',
+            f'line-height:1.6;">{_md_to_html(entry["answer"])}</div>',
             unsafe_allow_html=True,
         )
         if entry.get("tool"):

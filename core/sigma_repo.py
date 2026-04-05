@@ -49,6 +49,43 @@ def _extract_ttps(sigma: dict) -> List[str]:
     ]
 
 
+# MITRE ATT&CK Enterprise tactics (slugified, as used in sigma tags)
+MITRE_TACTICS: tuple = (
+    "reconnaissance",
+    "resource-development",
+    "initial-access",
+    "execution",
+    "persistence",
+    "privilege-escalation",
+    "defense-evasion",
+    "credential-access",
+    "discovery",
+    "lateral-movement",
+    "collection",
+    "command-and-control",
+    "exfiltration",
+    "impact",
+)
+
+
+def _extract_tactics(sigma: dict) -> List[str]:
+    """Extract MITRE ATT&CK tactic slugs from a sigma rule's tags field.
+
+    Sigma rules tag tactics as `attack.execution`, `attack.credential-access`,
+    etc. Returns the subset that matches the canonical enterprise tactic list.
+    """
+    tactics: List[str] = []
+    for tag in sigma.get("tags", []):
+        if not isinstance(tag, str):
+            continue
+        lowered = tag.lower()
+        if lowered.startswith("attack."):
+            slug = lowered[len("attack."):]
+            if slug in MITRE_TACTICS:
+                tactics.append(slug)
+    return tactics
+
+
 def _sigma_to_rule(sigma: dict, raw: str) -> Optional[DetectionRule]:
     """Convert a parsed sigma YAML dict + raw text to a DetectionRule.
 
@@ -193,6 +230,10 @@ class BaselineSigmaRepo:
         self._branch: str = "main"
         self._token: Optional[str] = None
         self._last_head_sha: Optional[str] = None
+        # Parsed alongside rules: {ttp_id -> set of tactic slugs} and
+        # {ttp_id -> rule_count}. Populated by load() from sigma tags.
+        self._ttp_tactics: Dict[str, set] = {}
+        self._ttp_rule_counts: Dict[str, int] = {}
 
     def load(
         self,
@@ -266,6 +307,7 @@ class BaselineSigmaRepo:
 
         self._rules = rules
         self._store_dicts = [self._to_store_dict(r) for r in rules]
+        self._build_tactic_maps()
         self._loaded_at = time.time()
         log.info(
             "Baseline loaded: %d rules, %d unique TTPs",
@@ -329,6 +371,34 @@ class BaselineSigmaRepo:
             "threat_actor": "",
             "source_url": self._local_path or self._repo_url or "",
             "created_at": "0",
+        }
+
+    def _build_tactic_maps(self) -> None:
+        """Parse each rule's raw YAML to derive {ttp -> tactics} and counts."""
+        ttp_tactics: Dict[str, set] = {}
+        ttp_counts: Dict[str, int] = {}
+        for rule in self._rules:
+            try:
+                data = yaml.safe_load(rule.rule_content)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            tactics = _extract_tactics(data)
+            for ttp in rule.mitre_ttps:
+                ttp_counts[ttp] = ttp_counts.get(ttp, 0) + 1
+                ttp_tactics.setdefault(ttp, set()).update(tactics)
+        self._ttp_tactics = ttp_tactics
+        self._ttp_rule_counts = ttp_counts
+
+    def technique_coverage(self) -> Dict[str, Dict]:
+        """Return {ttp_id: {rule_count, tactics}} across baseline rules."""
+        return {
+            ttp: {
+                "rule_count": self._ttp_rule_counts.get(ttp, 0),
+                "tactics": sorted(tactics),
+            }
+            for ttp, tactics in self._ttp_tactics.items()
         }
 
     def rules_as_store_dicts(self) -> List[Dict]:

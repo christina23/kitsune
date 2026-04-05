@@ -562,6 +562,10 @@ class RedisIntelStore(ThreatIntelStore):
         )
         return [{"ttp_id": ttp, "count": int(score)} for ttp, score in entries]
 
+    def count_iocs(self) -> int:
+        """Distinct IOC count (each IOC is indexed once in the timeline)."""
+        return int(self._r.zcard(self._timeline_key()) or 0)
+
     def flush(self) -> int:
         keys = list(self._r.scan_iter(f"{self._p}:*"))
         if keys:
