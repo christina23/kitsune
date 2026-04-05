@@ -894,16 +894,24 @@ class ThreatDetectionAgent:
         """Phase 1 coverage: compare extracted techniques vs store rules with TLSH."""
         techniques = getattr(state.get("threat_intel"), "techniques", []) or []
 
-        # Query store for existing rules covering each technique
+        # Query store for existing rules covering each technique.
+        # Prefer the batched helper (single pipelined round-trip) when
+        # available; fall back to per-TTP queries for stores that don't
+        # implement it.
         store_rules: List[Dict] = []
         if self.store:
-            seen_keys: set = set()
-            for tech in techniques:
-                for r in self.store.query_rules(ttp=tech.id, limit=20):
-                    key = r.get("rule_id", r.get("name", ""))
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        store_rules.append(r)
+            ttp_ids = [t.id for t in techniques]
+            batched = getattr(self.store, "query_rules_for_ttps", None)
+            if callable(batched) and ttp_ids:
+                store_rules = batched(ttp_ids, limit_per_ttp=20)
+            else:
+                seen_keys: set = set()
+                for tech in techniques:
+                    for r in self.store.query_rules(ttp=tech.id, limit=20):
+                        key = r.get("rule_id", r.get("name", ""))
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            store_rules.append(r)
 
         # Prepend baseline corpus so Phase 1 checks it even when Redis is empty
         baseline_dicts = get_baseline_repo().rules_as_store_dicts()

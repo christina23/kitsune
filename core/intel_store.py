@@ -442,6 +442,53 @@ class RedisIntelStore(ThreatIntelStore):
         results.sort(key=lambda r: float(r.get("created_at", 0)), reverse=True)
         return results
 
+    def query_rules_for_ttps(
+        self, ttps: List[str], limit_per_ttp: int = 20
+    ) -> List[Dict]:
+        """Batch-query rules for multiple TTPs using Redis pipelines.
+
+        Equivalent to calling query_rules(ttp=t, limit=limit_per_ttp) for
+        each TTP and deduplicating, but uses only 2 Redis round-trips total
+        instead of 2*N. Returned rule dicts are deduplicated by key and
+        sorted by created_at descending.
+        """
+        if not ttps:
+            return []
+
+        # Round 1: batch smembers for each TTP's rule index
+        pipe = self._r.pipeline()
+        for ttp in ttps:
+            pipe.smembers(self._ttp_rule_idx(ttp))
+        key_sets = pipe.execute()
+
+        # Collect deduped keys, preserving per-TTP limit
+        seen: set = set()
+        ordered_keys: List[str] = []
+        for key_set in key_sets:
+            for k in list(key_set)[:limit_per_ttp]:
+                if k not in seen:
+                    seen.add(k)
+                    ordered_keys.append(k)
+
+        if not ordered_keys:
+            return []
+
+        # Round 2: batch hgetall for all unique keys
+        pipe = self._r.pipeline()
+        for key in ordered_keys:
+            pipe.hgetall(key)
+        all_data = pipe.execute()
+
+        results = [
+            {"rule_id": key, **data}
+            for key, data in zip(ordered_keys, all_data)
+            if data
+        ]
+        results.sort(
+            key=lambda r: float(r.get("created_at", 0)), reverse=True
+        )
+        return results
+
     def rules_exist_for_ioc_hash(self, ioc_hash: str) -> bool:
         return self._r.scard(self._ioc_hash_rule_idx(ioc_hash)) > 0
 
