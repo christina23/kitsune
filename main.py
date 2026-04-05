@@ -3,7 +3,9 @@ Main entry point for the Threat Detection Agent
 """
 
 import argparse
+import json
 import os
+import pprint
 import sys
 import traceback
 from typing import List, Optional
@@ -14,6 +16,7 @@ from core.agent import ThreatDetectionAgent
 from core.config import RedisConfig, Settings
 from core.intel_store import ThreatIntelStore, create_store
 from core.enrichment import enrich_rule, get_coverage_trends
+from core.models import DetectionRule
 from core.utils import parse_providers_from_env, safe_filename
 
 
@@ -127,9 +130,6 @@ def run_query_mode(
         if not match:
             print(f"[error] Rule '{args.rule_name}' not found in store.")
             sys.exit(1)
-        import json
-        from core.models import DetectionRule
-
         rule = DetectionRule(
             name=match["name"],
             description="",
@@ -140,8 +140,6 @@ def run_query_mode(
             format=match["format"],
         )
         enriched = enrich_rule(rule, store)
-        import pprint
-
         pprint.pprint(enriched)
 
 

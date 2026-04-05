@@ -233,6 +233,10 @@ class ThreatDetectionAgent:
     ):
         self.store = store
         self._last_state: Optional[AgentState] = None
+        # Per-URL cache so that calling generate_detections() with the same
+        # URL for multiple formats (e.g. sigma + spl) avoids re-fetching the
+        # page and re-running the extraction LLM call.
+        self._url_cache: Dict[str, Dict] = {}
         self.llm_provider = llm_provider or os.getenv("LLM_PROVIDER", "openai")
         self.llm_factory = LLMFactory(
             default_provider=self.llm_provider, api_keys=api_keys
@@ -319,22 +323,6 @@ class ThreatDetectionAgent:
 
         raise ValueError("Failed to get valid JSON response after all retries")
 
-    def _retry_llm_call(
-        self, chain, input_data: dict, max_retries: int = 3, delay: float = 1.0
-    ):
-        """Retry LLM calls with exponential backoff"""
-        for attempt in range(max_retries):
-            try:
-                return chain.invoke(input_data)
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise e
-                print(
-                    f"Attempt {attempt + 1} failed"
-                    f" for {self.llm_provider}: {str(e)}"
-                )
-                time.sleep(delay * (2**attempt))
-
     def _route_to_rule_generator(self, state: AgentState) -> str:
         """Route to appropriate rule generator based on format"""
         if state.get("threat_intel") is None:
@@ -375,6 +363,11 @@ class ThreatDetectionAgent:
 
     def _fetch_content(self, state: AgentState) -> AgentState:
         """Fetch and process content from URL"""
+        cached = self._url_cache.get(state["url"])
+        if cached and "content" in cached:
+            state["content"] = cached["content"]
+            print(f"Reusing cached content for {state['url']} ({len(cached['content'])} chars)")
+            return state
         try:
             loader = WebBaseLoader(state["url"])
             documents = loader.load()
@@ -386,6 +379,7 @@ class ThreatDetectionAgent:
                 else full_text
             )
             state["content"] = relevant_content
+            self._url_cache.setdefault(state["url"], {})["content"] = relevant_content
             print(f"Fetched {len(relevant_content)} characters from URL")
 
             # Input-side safety scan — flag suspicious instruction-like text
@@ -406,6 +400,17 @@ class ThreatDetectionAgent:
     def _extract_threat_intel(self, state: AgentState) -> AgentState:
         """Extract threat intelligence from content"""
         if not state["content"]:
+            return state
+
+        cached = self._url_cache.get(state["url"])
+        if cached and "threat_intel" in cached:
+            state["threat_intel"] = cached["threat_intel"]
+            intel = cached["threat_intel"]
+            actor = intel.threat_actor or "Unknown Actor"
+            print(
+                f"Reusing cached threat intel for: {actor} "
+                f"({intel.iocs.total_count()} IOCs, {len(intel.techniques)} TTPs)"
+            )
             return state
 
         extraction_prompt = ChatPromptTemplate.from_messages(
@@ -455,6 +460,7 @@ class ThreatDetectionAgent:
 
             threat_intel = ThreatIntelligence(**raw_intel)
             state["threat_intel"] = threat_intel
+            self._url_cache.setdefault(state["url"], {})["threat_intel"] = threat_intel
             actor = threat_intel.threat_actor or "Unknown Actor"
             ioc_count = threat_intel.iocs.total_count()
             ttp_count = len(threat_intel.techniques)
