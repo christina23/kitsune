@@ -114,6 +114,11 @@ def _enrich_sigma_yaml(
 
     if threat_actor:
         # Multi-actor strings like "UNC6353, UNC6691" become two tags.
+        # For each actor, emit attack.g#### if MITRE has a group mapping,
+        # otherwise fall back to actor.<slug>. Slugs that resolve to a
+        # MITRE group displace any pre-existing `actor.<slug>` tag the
+        # LLM may have added, so the group tag wins.
+        redundant_actor_slugs: set = set()
         for actor_name in _split_actors(threat_actor):
             slug = _actor_slug(actor_name)
             if not slug:
@@ -121,11 +126,22 @@ def _enrich_sigma_yaml(
             group_id = _mitre_group_lookup(slug)
             if group_id:
                 candidate = f"attack.{group_id.lower()}"
+                redundant_actor_slugs.add(slug)
             else:
                 candidate = f"actor.{slug}"
             if candidate.lower() not in tags_lower:
                 tags.append(candidate)
                 tags_lower.add(candidate.lower())
+        # Strip any now-redundant actor.<slug> tags.
+        if redundant_actor_slugs:
+            tags = [
+                t for t in tags
+                if not (
+                    isinstance(t, str)
+                    and t.lower().startswith("actor.")
+                    and t.lower().split(".", 1)[1] in redundant_actor_slugs
+                )
+            ]
 
     doc["tags"] = tags
 
