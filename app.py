@@ -14,7 +14,6 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import pandas as pd
 import requests
 import streamlit as st
 
@@ -193,13 +192,16 @@ def _fmt_ts(ts: Optional[str]) -> str:
         return ts
 
 
-def _parse_json_list(raw: Optional[str]) -> List[str]:
+def _parse_json_list(raw) -> List[str]:
     if not raw:
         return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
     try:
-        return json.loads(raw)
+        out = json.loads(raw)
+        return out if isinstance(out, list) else [str(out)]
     except (json.JSONDecodeError, TypeError):
-        return [raw]
+        return [str(raw)]
 
 
 def _pill(text: str, bg: str, fg: str = "#fff") -> str:
@@ -235,26 +237,30 @@ def _priority_badge(priority: str) -> str:
     return _pill(priority.upper(), bg, fg)
 
 
-def _relative_time(epoch_str: str) -> str:
-    """Convert an epoch timestamp string to a human-readable relative time."""
-    try:
-        ts = float(epoch_str)
-        delta = time.time() - ts
-        if delta < 60:
-            return "just now"
-        elif delta < 3600:
-            m = int(delta // 60)
-            return f"{m}m ago"
-        elif delta < 86400:
-            h = int(delta // 3600)
-            return f"{h}h ago"
-        elif delta < 604800:
-            d = int(delta // 86400)
-            return f"{d}d ago"
-        else:
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
+def _relative_time(ts_str: str) -> str:
+    """Convert an ISO 8601 UTC (or epoch) timestamp to a human-readable relative time."""
+    if not ts_str:
         return ""
+    ts: float
+    try:
+        ts = float(ts_str)
+    except (ValueError, TypeError):
+        try:
+            s = ts_str.replace("Z", "+00:00")
+            ts = datetime.fromisoformat(s).timestamp()
+        except (ValueError, TypeError):
+            return ""
+    delta = time.time() - ts
+    if delta < 60:
+        return "just now"
+    elif delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    elif delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    elif delta < 604800:
+        return f"{int(delta // 86400)}d ago"
+    else:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
 def _ioc_type_badge(ioc_type: str) -> str:
@@ -380,6 +386,12 @@ if run_pipeline:
         if resp and resp.get("task_id"):
             st.session_state["pipeline_task_id"] = resp["task_id"]
             st.session_state["pipeline_result"] = None
+            # Remember params so "Regenerate" can re-run the same job.
+            st.session_state["last_pipeline_params"] = {
+                "url": pipeline_url.strip(),
+                "rule_format": pipeline_fmt,
+                "llm_provider": pipeline_llm,
+            }
             st.rerun()
 
 # ── Pipeline Polling (fragment — sidebar stays stable) ────────────────────────
@@ -450,8 +462,9 @@ if review_task_id and not st.session_state.get("pipeline_result"):
         v_cols[1].metric("Needs Review", review_count)
         v_cols[2].metric("Failed", fail_count)
 
-        # Show each rule for review
+        # Show each rule for review — all checked by default; uncheck to exclude.
         rule_edits: Dict[str, str] = {}
+        included_names: List[str] = []
         for i, rule in enumerate(review_data["rules"]):
             verdict = rule.get("verdict", "pass")
             issues = rule.get("issues", [])
@@ -463,34 +476,45 @@ if review_task_id and not st.session_state.get("pipeline_result"):
             bg, fg = badge_colors.get(verdict, ("#21262d", "#8b949e"))
             verdict_badge = _pill(verdict.upper(), bg, fg)
 
-            with st.expander(
-                f"[{rule.get('format', 'sigma').upper()}] {rule['name']} — {verdict}",
-                expanded=(verdict != "pass"),
-            ):
-                st.markdown(
-                    f"{verdict_badge} **{rule['name']}**",
-                    unsafe_allow_html=True,
-                )
-                if issues:
-                    for issue in issues:
-                        st.warning(issue)
-
-                ttps = rule.get("mitre_ttps", [])
-                if ttps:
-                    st.markdown(
-                        " ".join(_ttp_badge(t) for t in ttps[:6]),
-                        unsafe_allow_html=True,
-                    )
-
-                edited = st.text_area(
-                    "Rule content",
-                    value=rule.get("rule_content", ""),
-                    height=240,
-                    key=f"review_edit_{i}",
+            include_col, expander_col = st.columns([0.5, 11])
+            with include_col:
+                include = st.checkbox(
+                    "Include",
+                    value=True,
+                    key=f"review_include_{i}",
                     label_visibility="collapsed",
                 )
-                if edited != rule.get("rule_content", ""):
-                    rule_edits[rule["name"]] = edited
+            if include:
+                included_names.append(rule["name"])
+            with expander_col:
+                with st.expander(
+                    f"[{rule.get('format', 'sigma').upper()}] {rule['name']} — {verdict}",
+                    expanded=(verdict != "pass"),
+                ):
+                    st.markdown(
+                        f"{verdict_badge} **{rule['name']}**",
+                        unsafe_allow_html=True,
+                    )
+                    if issues:
+                        for issue in issues:
+                            st.warning(issue)
+
+                    ttps = rule.get("mitre_ttps", [])
+                    if ttps:
+                        st.markdown(
+                            " ".join(_ttp_badge(t) for t in ttps[:6]),
+                            unsafe_allow_html=True,
+                        )
+
+                    edited = st.text_area(
+                        "Rule content",
+                        value=rule.get("rule_content", ""),
+                        height=240,
+                        key=f"review_edit_{i}",
+                        label_visibility="collapsed",
+                    )
+                    if edited != rule.get("rule_content", ""):
+                        rule_edits[rule["name"]] = edited
 
         # Review action buttons
         st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
@@ -500,10 +524,23 @@ if review_task_id and not st.session_state.get("pipeline_result"):
             key="review_feedback",
         )
 
-        btn_cols = st.columns([1, 1, 4])
+        st.caption(
+            f"{len(included_names)} of {len(review_data['rules'])} rule(s) selected for PR."
+        )
+        btn_cols = st.columns([1.2, 1.2, 4])
         with btn_cols[0]:
-            if st.button("Approve", type="primary", key="btn_approve", use_container_width=True):
-                payload: Dict[str, Any] = {"decision": "approved"}
+            create_pr_disabled = len(included_names) == 0
+            if st.button(
+                "Create PR",
+                type="primary",
+                key="btn_create_pr",
+                use_container_width=True,
+                disabled=create_pr_disabled,
+            ):
+                payload: Dict[str, Any] = {
+                    "decision": "approved",
+                    "included_rule_names": included_names,
+                }
                 if feedback:
                     payload["feedback"] = feedback
                 if rule_edits:
@@ -511,6 +548,17 @@ if review_task_id and not st.session_state.get("pipeline_result"):
                 resp = _post(f"/tasks/{review_task_id}/review", payload)
                 if resp:
                     st.success(f"Approved {resp.get('rules_ingested', 0)} rules.")
+                    pr_url = resp.get("pr_url")
+                    pr_error = resp.get("pr_error")
+                    if pr_url:
+                        st.success(f"Draft PR created: [{pr_url}]({pr_url})")
+                        st.session_state["last_pr_url"] = pr_url
+                    else:
+                        # Always surface *something* — no silent failures.
+                        st.error(
+                            "PR not created: "
+                            + (pr_error or "unknown reason (check API logs)")
+                        )
                     # Fetch the final result
                     task = _get(f"/tasks/{review_task_id}")
                     if task and task.get("result"):
@@ -519,15 +567,27 @@ if review_task_id and not st.session_state.get("pipeline_result"):
                     st.rerun()
 
         with btn_cols[1]:
-            if st.button("Reject", key="btn_reject", use_container_width=True):
+            last_params = st.session_state.get("last_pipeline_params")
+            if st.button(
+                "Regenerate",
+                key="btn_regenerate",
+                use_container_width=True,
+                disabled=not last_params,
+                help="Discard these rules and re-run the pipeline on the same URL.",
+            ):
+                # First, clear the pending-review task server-side.
                 payload = {"decision": "rejected"}
                 if feedback:
                     payload["feedback"] = feedback
-                resp = _post(f"/tasks/{review_task_id}/review", payload)
-                if resp:
-                    st.warning("Rules rejected.")
-                    st.session_state["review_task_id"] = None
-                    st.rerun()
+                _post(f"/tasks/{review_task_id}/review", payload)
+                # Then kick off a fresh pipeline run with the original params.
+                if last_params:
+                    new_resp = _post("/analyze", last_params)
+                    if new_resp and new_resp.get("task_id"):
+                        st.session_state["pipeline_task_id"] = new_resp["task_id"]
+                        st.session_state["pipeline_result"] = None
+                st.session_state["review_task_id"] = None
+                st.rerun()
 
 
 # ── Main Content ──────────────────────────────────────────────────────────────
@@ -558,6 +618,11 @@ if pipeline_result and not pipeline_result.get("error"):
             len(exact_gaps),
             delta=f"{len(fuzzy_gaps)} fuzzy" if fuzzy_gaps else None,
         )
+
+        # ── Draft PR link (if just created) ─────────────────────────────────
+        _pr_url = st.session_state.get("last_pr_url")
+        if _pr_url:
+            st.success(f"Draft PR opened: [{_pr_url}]({_pr_url})")
 
         # ── Extracted IOCs (directly visible) ─────────────────────────────────
         # Fetch enriched IOC data from Redis (has first_seen timestamps)
@@ -685,6 +750,7 @@ if pipeline_result and not pipeline_result.get("error"):
         st.markdown("<div style='height:1rem;'></div>", unsafe_allow_html=True)
         if st.button("✕ Clear Results", key="btn_clear"):
             st.session_state["pipeline_result"] = None
+            st.session_state.pop("last_pr_url", None)
             st.rerun()
 
 elif pipeline_result and pipeline_result.get("error"):
@@ -705,18 +771,40 @@ else:
     total_iocs = sum(e.get("ioc_count", 0) for e in coverage)
     no_rules = sum(1 for e in coverage if not e.get("has_rules"))
 
-    # Fetch unique rule count (coverage sums per-TTP which double-counts)
+    # Fetch rule count — only count rules synced back from merged PRs as "merged"
+    baseline_count = 0
+    merged_count = 0
+    merged_actors: set = set()
     try:
         _rules_resp = requests.get(f"{API_URL}/rules", params={"limit": 1000}, timeout=5)
         _rules_resp.raise_for_status()
-        total_rules = len(_rules_resp.json() or [])
+        for r in _rules_resp.json() or []:
+            if ":baseline:" in (r.get("rule_id") or ""):
+                baseline_count += 1
+            elif (r.get("source_url") or "").startswith("github:"):
+                merged_count += 1
+                _a = (r.get("threat_actor") or "").strip()
+                if _a:
+                    merged_actors.add(_a.lower())
     except Exception:
-        total_rules = sum(e.get("rule_count", 0) for e in coverage)
+        baseline_count = sum(e.get("rule_count", 0) for e in coverage)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Actors Tracked", len(actors))
-    c2.metric("IOCs in Store", total_iocs)
-    c3.metric("Detection Rules", total_rules)
+    c1.metric(
+        "Actors Tracked",
+        len(merged_actors),
+        delta=f"+{len(merged_actors)} merged" if merged_actors else None,
+    )
+    c2.metric(
+        "IOCs in Store",
+        total_iocs,
+        delta=f"+{merged_count} merged" if merged_count else None,
+    )
+    c3.metric(
+        "Detection Rules",
+        baseline_count + merged_count,
+        delta=f"+{merged_count} merged" if merged_count else None,
+    )
     c4.metric("Coverage Gaps", no_rules)
 
     st.markdown("<div style='height:1.2rem;'></div>", unsafe_allow_html=True)

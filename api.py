@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
@@ -30,9 +30,9 @@ load_dotenv()
 # Allow running from repo root without installing the package
 sys.path.insert(0, os.path.dirname(__file__))
 from core.intel_store import create_store
-from core.models import DetectionRule, RuleValidationResult
+from core.models import DetectionRule
 from core.sigma_repo import initialize_baseline_repo, get_baseline_repo
-from core.config import BaselineRepoConfig, GitHubConfig, RedisConfig
+from core.config import BaselineRepoConfig, GitHubConfig
 
 _API_DESCRIPTION = """\
 Kitsune is a threat-intelligence pipeline that ingests reports, extracts IOCs
@@ -371,12 +371,12 @@ async def scalar_ui() -> HTMLResponse:
 class IOCRecord(BaseModel):
     type: str
     value: str
-    first_seen: Optional[str] = None
-    last_seen: Optional[str] = None
-    threat_actors: Optional[str] = None  # JSON-encoded list
-    campaigns: Optional[str] = None
-    ttps: Optional[str] = None
-    source_urls: Optional[str] = None
+    first_seen: Optional[str] = None  # ISO 8601 UTC
+    last_seen: Optional[str] = None  # ISO 8601 UTC
+    threat_actors: List[str] = []
+    campaigns: List[str] = []
+    ttps: List[str] = []
+    source_urls: List[str] = []
 
 
 class RuleRecord(BaseModel):
@@ -384,10 +384,63 @@ class RuleRecord(BaseModel):
     name: str
     format: str
     rule_content: Optional[str] = None
-    ttps: Optional[str] = None  # JSON-encoded list
+    ttps: List[str] = []
     threat_actor: Optional[str] = None
     source_url: Optional[str] = None
-    created_at: Optional[str] = None
+    created_at: Optional[str] = None  # ISO 8601 UTC
+
+
+def _epoch_to_iso(v) -> Optional[str]:
+    """Convert a Unix epoch (str/float) to ISO 8601 UTC (e.g. 2026-04-04T17:14:29Z)."""
+    if v is None or v == "":
+        return None
+    try:
+        ts = float(v)
+    except (TypeError, ValueError):
+        # Already a string timestamp — pass through
+        return str(v)
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _decode_list(v) -> List[str]:
+    """Decode a JSON-encoded list string from Redis; return [] on any failure."""
+    if not v:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    try:
+        out = json.loads(v)
+        if isinstance(out, list):
+            return [str(x) for x in out]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def _normalize_ioc_record(rec: Dict) -> Dict:
+    return {
+        "type": rec.get("type", ""),
+        "value": rec.get("value", ""),
+        "first_seen": _epoch_to_iso(rec.get("first_seen")),
+        "last_seen": _epoch_to_iso(rec.get("last_seen")),
+        "threat_actors": _decode_list(rec.get("threat_actors")),
+        "campaigns": _decode_list(rec.get("campaigns")),
+        "ttps": _decode_list(rec.get("ttps")),
+        "source_urls": _decode_list(rec.get("source_urls")),
+    }
+
+
+def _normalize_rule_record(rec: Dict) -> Dict:
+    return {
+        "rule_id": rec.get("rule_id"),
+        "name": rec.get("name", ""),
+        "format": rec.get("format", ""),
+        "rule_content": rec.get("rule_content"),
+        "ttps": _decode_list(rec.get("ttps")),
+        "threat_actor": rec.get("threat_actor"),
+        "source_url": rec.get("source_url"),
+        "created_at": _epoch_to_iso(rec.get("created_at")),
+    }
 
 
 class TrendingTTP(BaseModel):
@@ -668,7 +721,7 @@ def query_iocs(
     """
     store = get_store()
     results = store.query_iocs(actor=actor, ttp=ttp, ioc_type=ioc_type, limit=limit)
-    return results
+    return [_normalize_ioc_record(r) for r in results]
 
 
 @app.get("/rules", response_model=List[RuleRecord], tags=["Detection Rules"])
@@ -684,7 +737,7 @@ def query_rules(
     """
     store = get_store()
     results = store.query_rules(actor=actor, ttp=ttp, limit=limit)
-    return results
+    return [_normalize_rule_record(r) for r in results]
 
 
 @app.get("/trends", response_model=List[TrendingTTP], tags=["Analytics"])
@@ -789,12 +842,15 @@ class ReviewDecision(BaseModel):
     decision: Literal["approved", "rejected"]
     feedback: Optional[str] = None
     rule_edits: Optional[Dict[str, str]] = None  # rule_name -> edited content
+    included_rule_names: Optional[List[str]] = None  # if set, only these rules are kept
 
 
 class ReviewDecisionResponse(BaseModel):
     task_id: str
     decision: str
     rules_ingested: int = 0
+    pr_url: Optional[str] = None
+    pr_error: Optional[str] = None
 
 
 @app.get("/tasks/{task_id}/review", response_model=ReviewResponse, tags=["Pipeline"])
@@ -859,30 +915,84 @@ def submit_review(task_id: str, req: ReviewDecision):
 
     agent = task.get("agent")
     rules_ingested = 0
+    approved_rules: List = []
+    threat_actor_name: Optional[str] = None
 
     if agent:
         state = agent.resume_after_review(
-            thread_id="",
             decision=req.decision,
             feedback=req.feedback,
             rule_edits=req.rule_edits,
         )
         if state and req.decision == "approved":
-            rules_ingested = len(state.get("detection_rules", []))
+            approved_rules = state.get("detection_rules", [])
+            # Filter to only rules the user kept checked in the UI.
+            if req.included_rule_names is not None:
+                keep = {n for n in req.included_rule_names}
+                approved_rules = [r for r in approved_rules if r.name in keep]
+            rules_ingested = len(approved_rules)
+            intel = state.get("threat_intel")
+            if intel:
+                threat_actor_name = intel.threat_actor
+
+    # Auto-create draft PR for approved rules
+    pr_url: Optional[str] = None
+    pr_error: Optional[str] = None
+    if req.decision == "approved" and not approved_rules:
+        pr_error = "No rules selected — nothing to propose."
+    if req.decision == "approved" and approved_rules:
+        from core.github_pr import get_github_client
+
+        try:
+            gh = get_github_client()
+        except Exception as exc:
+            gh = None
+            pr_error = f"GitHub client init failed: {exc}"
+
+        if gh is None and not pr_error:
+            pr_error = (
+                "GitHub integration not configured. "
+                f"GITHUB_TOKEN set: {bool(GitHubConfig.GITHUB_TOKEN)}, "
+                f"GITHUB_REPO set: {bool(GitHubConfig.GITHUB_REPO)}."
+            )
+        elif gh is not None:
+            validated = task.get("validated_rules", [])
+            review_summary = {
+                "decision": "approved",
+                "reviewed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "validation_summary": {
+                    "passed": sum(1 for v in validated if v.get("verdict") == "pass"),
+                    "needs_review": sum(1 for v in validated if v.get("verdict") == "needs_review"),
+                    "failed": sum(1 for v in validated if v.get("verdict") == "fail"),
+                },
+                "feedback": req.feedback or "",
+            }
+            try:
+                pr_url = gh.propose_rules(
+                    approved_rules,
+                    threat_actor=threat_actor_name,
+                    review_approved=True,
+                    review_summary=review_summary,
+                )
+            except Exception as exc:
+                pr_error = f"PR creation failed: {exc}"
 
     # Update task status
-    new_status = "done" if req.decision == "approved" else "done"
+    new_status = "done"
     _set_task(
         task_id,
         status=new_status,
         step=f"Review: {req.decision}",
         review_status=req.decision,
+        pr_url=pr_url,
     )
 
     return ReviewDecisionResponse(
         task_id=task_id,
         decision=req.decision,
         rules_ingested=rules_ingested,
+        pr_url=pr_url,
+        pr_error=pr_error,
     )
 
 
@@ -1100,7 +1210,7 @@ def ask_query(req: AskRequest):
     # Step 3: Send tool result back to LLM for a natural language summary
     summary_response = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1024,
+        max_tokens=4096,
         system=(
             "You are a threat intelligence analyst summarizing query results. "
             "Be concise and direct. Use markdown tables for structured data. "

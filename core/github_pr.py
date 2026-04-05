@@ -14,12 +14,35 @@ import hashlib
 import logging
 import re
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Dict, List, Optional
+
+import yaml
 
 from .config import GitHubConfig
 from .models import DetectionRule
 
 log = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def get_github_author_name() -> Optional[str]:
+    """Return the display name (or login) of the user behind GITHUB_TOKEN.
+
+    Cached for the lifetime of the process. Returns None if no token is
+    configured or the API call fails.
+    """
+    token = GitHubConfig.GITHUB_TOKEN
+    if not token:
+        return None
+    try:
+        from github import Auth, Github
+        gh = Github(auth=Auth.Token(token))
+        user = gh.get_user()
+        return (user.name or "").strip() or user.login
+    except Exception as e:
+        log.warning("get_github_author_name: could not resolve user: %s", e)
+        return None
 
 
 def _safe_branch_component(value: str) -> str:
@@ -82,7 +105,7 @@ def _build_pr_body(
     lines += [
         "",
         "---",
-        "_Proposed automatically by [kitsune](https://github.com/christina23/kitsune)_",
+        "_Generated automatically by [Kitsune](https://github.com/christina23/kitsune)_",
     ]
     return "\n".join(lines)
 
@@ -92,13 +115,13 @@ class GitHubPRClient:
 
     def __init__(self, token: str, repo_slug: str, base_branch: str = "main") -> None:
         try:
-            from github import Github
+            from github import Auth, Github
         except ImportError:
             raise ImportError(
                 "PyGithub is required for GitHub PR integration. "
                 "Install it with: pip install PyGithub"
             )
-        self._gh = Github(token)
+        self._gh = Github(auth=Auth.Token(token))
         self._repo = self._gh.get_repo(repo_slug)
         self._base_branch = base_branch
 
@@ -168,9 +191,6 @@ class GitHubPRClient:
         Fetches all closed PRs with title prefix "kitsune:" and extracts
         any .yml files from the merge commit.
         """
-        import yaml
-        import time
-
         rules: List[DetectionRule] = []
         pulls = self._repo.get_pulls(state="closed", base=self._base_branch)
 

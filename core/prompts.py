@@ -129,7 +129,11 @@ NOT field="value"). Double quotes inside rule_content break JSON encoding.
 actual line breaks.
 - Do NOT use backtick-wrapped comments (```like this```) inside rule_content.
 
-Rule naming convention: "[Actor]_[Behavior]_[System]_Detection"
+RULE NAMING — `name` must describe the BEHAVIOR or INDICATOR, not the \
+verdict or threat actor. Concise (3-7 words). Do NOT include actor/ \
+campaign names, "malicious", or "Detection" suffix. \
+Good: "Bulk_Salesforce_Export_By_Non_ETL_User". \
+Bad: "UNC6395_Data_Exfiltration_Detection" (actor + verdict).
 
 {json_format_section}
 
@@ -137,7 +141,7 @@ Return ONLY this JSON structure:
 {{
   "rules": [
     {{
-      "name": "UNC6395_Data_Exfiltration_Salesforce_Detection",
+      "name": "Bulk_Salesforce_Export_By_Non_ETL_User",
       "description": "Detects abnormal data exfiltration volumes from \
 Salesforce by user over a rolling window, excluding known ETL accounts",
       "rule_content": "index=salesforce sourcetype=salesforce:api \
@@ -148,7 +152,7 @@ by user _time | where total_bytes > 500000000 AND obj_types > 3 \
       "mitre_ttps": ["T1020", "T1074"]
     }},
     {{
-      "name": "UNC6395_Credential_Spray_Cloud_Detection",
+      "name": "High_Distinct_User_Auth_Failures_Single_Source",
       "description": "Identifies credential spraying via high distinct-\
 user auth failures from single source within 15m window",
       "rule_content": "index=cloud_logs action=login status=failure \
@@ -192,21 +196,33 @@ selections to detect sequences or co-occurring events. Use "1 of selection*" \
 vs "all of them" deliberately based on whether you need ANY indicator or \
 the FULL pattern.
 
-4. QUANTITATIVE AWARENESS: When setting severity levels, consider the \
-base rate of the matched event. A "high" severity rule matching \
-EventID 4625 (logon failure) alone will drown SOC analysts; combine it \
-with a behavioral filter (e.g., count threshold, specific failure reason, \
-source scope) to improve signal-to-noise ratio.
+4. SEVERITY RUBRIC — set `level:` per this four-tier scale:
+   - critical: narrowly-scoped, high-confidence TTP, very low expected \
+false-positive rate (e.g., LSASS memory read from an unsigned binary \
+running out of a user temp directory).
+   - high: specific behavior, moderate-to-high confidence, few false \
+positives in a typical enterprise (e.g., suspicious child process of \
+winword.exe writing to Startup).
+   - medium: broader pattern, some expected benign overlap, requires \
+analyst triage (e.g., rundll32 with unusual command-line args).
+   - low: informational / hunt-only; will fire on legitimate admin \
+activity (e.g., any use of vssadmin).
+   Consider the base rate of the matched event — a "high" rule matching \
+EventID 4625 alone will drown SOC analysts.
 
 5. CARDINALITY & BASE RATE: Consider how often the matched pattern occurs \
 in normal operations. Common events (process_creation for cmd.exe, DNS \
 queries) need tighter filters. Rare events (LSASS access, scheduled task \
 creation from unusual paths) can use broader matches.
 
-6. FALSE POSITIVE EXCLUSION: Always include a "falsepositives:" section \
-with realistic entries. Use "filter_*" selection blocks to exclude known \
-benign patterns — admin tools, update services, monitoring agents, \
-expected automation.
+6. FALSE POSITIVE EXCLUSION (REQUIRED): Every rule MUST include:
+   (a) at least one `filter_*` selection block in the `detection:` section \
+that excludes known benign patterns — admin tools, update services, \
+monitoring agents, signed-binary paths, expected automation; AND
+   (b) a `falsepositives:` section with realistic entries.
+   The `condition:` must reference the filter via `... and not filter_*` \
+(or `1 of selection_* and not 1 of filter_*`). Rules without a \
+`filter_*` block will fail quality review.
 
 7. ALERT CONTEXT (5Ws+H): Write descriptions that tell the analyst who \
 is affected, what the detection means, and what to investigate next. \
@@ -225,9 +241,27 @@ SIGMA RULE REQUIREMENTS:
 file_event, etc.)
 2. Include specific selection criteria based on the threat behavior
 3. Add proper MITRE ATT&CK tags (attack.t####)
-4. Set appropriate severity levels justified by expected base rate
+4. Set appropriate severity levels per the rubric above
 5. Include condition logic (1 of selection, all of them, etc.)
 6. Include "falsepositives:" with at least one realistic entry per rule
+7. Threat actor tag — if the threat actor has a well-established MITRE \
+ATT&CK group id with high confidence, include its group tag (e.g., \
+attack.g0007 for APT28). Otherwise, omit an actor tag; kitsune will \
+attach a provisional actor.<slug> tag during post-processing.
+
+RULE NAMING — `name` and `title:` must follow these conventions:
+- Concise: aim for 3-7 words. No trailing "Detection", "Activity", \
+"Attempt", or "Rule".
+- Describe the BEHAVIOR or INDICATOR, not the verdict or actor. Do NOT \
+include the threat actor name, campaign name, "malicious", "suspicious \
+actor", or words that assume the verdict.
+- Good examples: "Executable Written to User Temp Directory", \
+"Login From Known-Bad ASN", "LSASS Memory Read by Unsigned Process", \
+"Scheduled Task Created from Office Process".
+- Bad examples: "UNC6395 Cloud Data Exfiltration Detection" (actor + \
+verdict), "APT28 Credential Spray" (actor), "Malicious PowerShell \
+Activity" (verdict, vague).
+- `name` in the JSON and `title:` inside the YAML MUST match.
 
 {json_format_section}
 
@@ -235,13 +269,13 @@ Return ONLY this JSON structure:
 {{
   "rules": [
     {{
-      "name": "UNC6395 Cloud Data Exfiltration Detection",
+      "name": "Bulk S3 GetObject From Non-Service Principal",
       "description": "Detects high-volume S3 GetObject calls from \
 non-service principals targeting sensitive buckets. Investigate: \
 confirm the IAM role, check if the access pattern matches known \
 ETL jobs, review destination IPs.",
-      "rule_content": "title: UNC6395 Cloud Data Exfiltration\\nid: \
-abc123\\nstatus: experimental\\nlogsource:\\n  service: cloudtrail\
+      "rule_content": "title: Bulk S3 GetObject From Non-Service Principal\
+\\nid: abc123\\nstatus: experimental\\nlogsource:\\n  service: cloudtrail\
 \\ndetection:\\n  selection:\\n    eventName: GetObject\\n    \
 requestParameters.bucketName|contains: 'sensitive'\\n  filter_svc:\
 \\n    userIdentity.type: 'AssumedRole'\\n    userIdentity.arn|contains:\
@@ -252,14 +286,14 @@ backup or ETL processes accessing sensitive buckets\\ntags:\\n  \
       "mitre_ttps": ["T1020"]
     }},
     {{
-      "name": "UNC6395 Suspicious Authentication Pattern",
+      "name": "High-Rate Failed Logons From Single Source",
       "description": "Identifies multiple failed authentication \
 attempts from a single source targeting distinct accounts within a \
 short window, consistent with credential spraying. Investigate: \
 check source IP reputation, confirm accounts are not locked out, \
 review successful auths from same source.",
-      "rule_content": "title: UNC6395 Credential Spray Pattern\\nid: \
-def456\\nstatus: experimental\\nlogsource:\\n  product: windows\
+      "rule_content": "title: High-Rate Failed Logons From Single Source\
+\\nid: def456\\nstatus: experimental\\nlogsource:\\n  product: windows\
 \\n  service: security\\ndetection:\\n  selection:\\n    EventID: \
 4625\\n    LogonType: 3\\n  filter_known:\\n    IpAddress|cidr:\\n\
       - '10.0.0.0/8'\\n      - '172.16.0.0/12'\\n  condition: \

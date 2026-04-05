@@ -2,22 +2,22 @@
 Core Threat Detection Agent implementation
 """
 
-import os
-import time
 import hashlib
+import json as _json
+import os
+import re as _re
+import time
+import uuid as _uuid
 from typing import TYPE_CHECKING, Dict, List, Optional, Literal
 
 if TYPE_CHECKING:
     from .intel_store import ThreatIntelStore
-from pathlib import Path
 
 import yaml as _yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
-from langchain.output_parsers import OutputFixingParser
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -26,18 +26,14 @@ from .models import (
     DetectionRule,
     AgentState,
     RuleOutput,
-    RulesBundle,
-    CoverageGap,
     RuleValidationResult,
 )
 from .config import Settings
 from .llm_factory import LLMFactory
 from .utils import (
     extract_json_from_text,
-    fix_json_formatting,
-    sanitize_rule_content,
+    scan_suspicious_input,
     determine_author,
-    safe_filename,
 )
 from .prompts import (
     THREAT_INTEL_EXTRACTION_PROMPT,
@@ -48,6 +44,7 @@ from .prompts import (
 from .ioc_parser import validate_and_enrich_iocs, validate_ttps
 from .coverage import analyze_gaps, _tlsh_distance, _tlsh_hash, TLSH_THRESHOLD
 from .sigma_repo import get_baseline_repo
+from .mitre_actors import lookup as _mitre_group_lookup
 
 
 def _compute_ioc_hash(iocs) -> str:
@@ -59,6 +56,83 @@ def _compute_ioc_hash(iocs) -> str:
         if v.strip()
     )
     return hashlib.sha256("|".join(all_values).encode()).hexdigest()[:32]
+
+
+def _actor_slug(name: str) -> str:
+    """Normalize a threat-actor name for tag/lookup use."""
+    return _re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+def _enrich_sigma_yaml(
+    rule_content: str,
+    reference: str,
+    author: str,
+    threat_actor: Optional[str],
+) -> str:
+    """Post-process a sigma YAML string to inject kitsune metadata.
+
+    Adds: `references:` (report URL), `author:`, `kitsune.generated` tag,
+    and an actor tag (attack.g#### from the ACTOR_TO_MITRE_GROUP lookup
+    when available, otherwise actor.<slug>). Existing values are preserved.
+    """
+    try:
+        doc = _yaml.safe_load(rule_content)
+    except Exception:
+        return rule_content
+    if not isinstance(doc, dict):
+        return rule_content
+
+    # references — merge, don't duplicate
+    refs = doc.get("references") or []
+    if not isinstance(refs, list):
+        refs = [refs]
+    if reference and reference not in refs:
+        refs.append(reference)
+    doc["references"] = refs
+
+    # author — only override if missing
+    if author and not doc.get("author"):
+        doc["author"] = author
+
+    # tags — ensure kitsune.generated + actor tag
+    tags = doc.get("tags") or []
+    if not isinstance(tags, list):
+        tags = [tags]
+    tags_lower = {str(t).lower() for t in tags}
+
+    if "kitsune.generated" not in tags_lower:
+        tags.append("kitsune.generated")
+        tags_lower.add("kitsune.generated")
+
+    if threat_actor:
+        slug = _actor_slug(threat_actor)
+        has_group_tag = any(t.startswith("attack.g") for t in tags_lower)
+        has_actor_tag = any(t.startswith("actor.") for t in tags_lower)
+        if not has_group_tag and not has_actor_tag and slug:
+            group_id = _mitre_group_lookup(slug)
+            if group_id:
+                tags.append(f"attack.{group_id.lower()}")
+            else:
+                tags.append(f"actor.{slug}")
+
+    doc["tags"] = tags
+
+    # Canonical sigma field order: title, id, status, author, references,
+    # description, date, logsource, detection, falsepositives, level, tags.
+    # Rebuild dict preserving any extra keys at the end.
+    preferred_order = [
+        "title", "id", "status", "author", "references", "description",
+        "date", "logsource", "detection", "falsepositives", "level", "tags",
+    ]
+    ordered = {k: doc[k] for k in preferred_order if k in doc}
+    for k, v in doc.items():
+        if k not in ordered:
+            ordered[k] = v
+
+    try:
+        return _yaml.safe_dump(ordered, sort_keys=False, default_flow_style=False)
+    except Exception:
+        return rule_content
 
 
 def _filter_baseline_duplicates(
@@ -285,6 +359,16 @@ class ThreatDetectionAgent:
             )
             state["content"] = relevant_content
             print(f"Fetched {len(relevant_content)} characters from URL")
+
+            # Input-side safety scan — flag suspicious instruction-like text
+            suspicious = scan_suspicious_input(relevant_content)
+            if suspicious:
+                warning = (
+                    f"Suspicious input patterns detected "
+                    f"({len(suspicious)}): {suspicious[:5]}"
+                )
+                print(f"⚠️  {warning}")
+                state.setdefault("errors", []).append(f"input_guard: {warning}")
         except Exception as e:
             state["error"] = f"Failed to fetch content: {str(e)}"
             state.setdefault("errors", []).append(f"fetch: {e}")
@@ -387,7 +471,6 @@ class ThreatDetectionAgent:
             "review_status": None,
             "review_feedback": None,
         }
-        import uuid as _uuid
         config = {
             "configurable": {
                 "thread_id": f"threat-detection-{_uuid.uuid4().hex[:12]}"
@@ -406,7 +489,6 @@ class ThreatDetectionAgent:
 
     def resume_after_review(
         self,
-        thread_id: str,
         decision: Literal["approved", "rejected"],
         feedback: Optional[str] = None,
         rule_edits: Optional[Dict[str, str]] = None,
@@ -507,7 +589,6 @@ class ThreatDetectionAgent:
         )
         if ioc_hash and self.store and self.store.rules_exist_for_ioc_hash(ioc_hash):
             existing = self.store.get_rules_by_ioc_hash(ioc_hash)
-            import json as _json
             matching = [
                 r for r in existing
                 if r.get("format", rule_format) == rule_format and r.get("rule_content")
@@ -567,6 +648,7 @@ class ThreatDetectionAgent:
                 rule_format=rule_format,
                 reference=state["url"],
                 author=author,
+                threat_actor=intel.threat_actor,
             )
             print(f"Generated {len(state['detection_rules'])} {rule_format.upper()} rules")
 
@@ -634,12 +716,6 @@ class ThreatDetectionAgent:
                         f"Rule TTPs {rule.mitre_ttps} do not overlap with "
                         f"extracted intel TTPs"
                     )
-
-            # Content safety check
-            content_lower = rule.rule_content.lower()
-            for term in Settings.FORBIDDEN_TERMS:
-                if term.lower() in content_lower:
-                    issues.append(f"Contains forbidden term: '{term}'")
 
             # ── Detection quality checks ────────────────────────────────
             self._check_detection_quality(rule, parsed_sigma, issues)
@@ -821,6 +897,7 @@ class ThreatDetectionAgent:
         rule_format: Literal["sigma", "spl"],
         reference: str,
         author: Optional[str] = None,
+        threat_actor: Optional[str] = None,
     ) -> List[DetectionRule]:
         """Finalize and deduplicate rules"""
         seen = set()
@@ -862,13 +939,21 @@ class ThreatDetectionAgent:
             seen.add(dedup_key)
 
             mitre = ro.mitre_ttps if getattr(ro, "mitre_ttps", None) else []
+            rule_content = ro.rule_content
+            if rule_format == "sigma":
+                rule_content = _enrich_sigma_yaml(
+                    rule_content,
+                    reference=reference,
+                    author=author,
+                    threat_actor=threat_actor,
+                )
             rule = DetectionRule(
                 name=ro.name,
                 description=ro.description,
                 author=author,
                 references=[reference],
                 mitre_ttps=mitre,
-                rule_content=sanitize_rule_content(ro.rule_content),
+                rule_content=rule_content,
                 format=rule_format,
             )
             finalized.append(rule)

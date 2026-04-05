@@ -39,8 +39,20 @@ def safe_filename(name: str) -> str:
 
 
 def determine_author(url: str, threat_actor: str = None) -> str:
-    """Determine appropriate author based on source URL"""
-    url_lower = url.lower()
+    """Determine appropriate author.
+
+    Prefers the GitHub user name associated with GITHUB_TOKEN (so rules are
+    attributed to the human running kitsune). Falls back to the report-domain
+    mapping, then to the default.
+    """
+    try:
+        from .github_pr import get_github_author_name
+        gh_name = get_github_author_name()
+        if gh_name:
+            return gh_name
+    except Exception:
+        pass
+    url_lower = (url or "").lower()
     for domain, author in AuthorMapping.DOMAIN_AUTHORS.items():
         if domain in url_lower:
             return author
@@ -137,10 +149,15 @@ def fix_json_formatting(json_str: str) -> str:
     return json_str
 
 
-def sanitize_rule_content(content: str) -> str:
-    """Check for and sanitize potentially dangerous rule content"""
-    content_lower = content.lower()
-    for term in Settings.FORBIDDEN_TERMS:
-        if term in content_lower:
-            return f"# [BLOCKED UNSAFE CONTENT]\n{content}"
-    return content
+def scan_suspicious_input(text: str) -> list[str]:
+    """Scan fetched intel text for instruction-like patterns that may
+    indicate prompt injection. Returns a list of matched snippets (empty
+    if clean). Non-blocking — callers decide what to do with matches.
+    """
+    if not text:
+        return []
+    matches: list[str] = []
+    for pattern in Settings.SUSPICIOUS_INPUT_PATTERNS:
+        for m in re.finditer(pattern, text, flags=re.IGNORECASE):
+            matches.append(m.group(0))
+    return matches
