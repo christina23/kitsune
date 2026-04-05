@@ -14,7 +14,6 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import pandas as pd
 import requests
 import streamlit as st
 
@@ -184,6 +183,139 @@ def _put(endpoint: str, payload: Dict) -> Any:
         return None
 
 
+def _md_to_html(text: str) -> str:
+    """Minimal markdown-to-HTML for the /ask answer bubble.
+
+    Streamlit's markdown parser does not re-process markdown inside a
+    raw HTML `<div>`, so we convert the two constructs the summary LLM
+    is asked to emit — bullet lists and tables — into HTML inline.
+    Everything else is passed through with `\\n` → `<br>`.
+    """
+    if not text:
+        return ""
+    # Convert markdown links [text](url) → <a href="url">text</a> first,
+    # so they render inside table cells and plain text alike.
+    import re as _re_md
+    text = _re_md.sub(
+        r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+        r'<a href="\2" target="_blank" style="color:#79c0ff;">\1</a>',
+        text,
+    )
+    # Inline emphasis: **bold** and *italic* (bold first to avoid
+    # greedy single-asterisk matches eating the double-asterisk pair).
+    text = _re_md.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", text)
+    text = _re_md.sub(
+        r"(?<![*\w])\*([^*\n]+)\*(?!\w)", r"<em>\1</em>", text
+    )
+    # Inline `code`
+    text = _re_md.sub(
+        r"`([^`\n]+)`",
+        r'<code style="background:#21262d; padding:1px 5px; '
+        r'border-radius:4px; font-size:0.82em;">\1</code>',
+        text,
+    )
+    lines = text.split("\n")
+    out: List[str] = []
+    in_ul = False
+    in_table = False
+    table_header_seen = False
+
+    def _close_ul():
+        nonlocal in_ul
+        if in_ul:
+            out.append("</ul>")
+            in_ul = False
+
+    def _close_table():
+        nonlocal in_table, table_header_seen
+        if in_table:
+            out.append("</table>")
+            in_table = False
+            table_header_seen = False
+
+    table_style = (
+        "border-collapse:collapse; margin:0.4em 0; font-size:0.82rem;"
+    )
+    th_style = (
+        "text-align:left; padding:4px 10px; "
+        "border-bottom:1px solid #30363d; color:#8b949e; font-weight:600;"
+    )
+    td_style = (
+        "padding:4px 10px; border-bottom:1px solid #21262d; color:#c9d1d9;"
+    )
+
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.lstrip()
+        # Markdown table row (very simple detection)
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            # Skip the separator row (|---|---|)
+            if all(set(c) <= set("-: ") for c in cells) and cells:
+                table_header_seen = True
+                continue
+            _close_ul()
+            if not in_table:
+                out.append(f"<table style=\"{table_style}\">")
+                in_table = True
+            tag = "th" if not table_header_seen else "td"
+            style = th_style if tag == "th" else td_style
+            out.append(
+                "<tr>"
+                + "".join(f"<{tag} style=\"{style}\">{c}</{tag}>" for c in cells)
+                + "</tr>"
+            )
+            if tag == "th":
+                table_header_seen = True
+            continue
+        # Bullet list item
+        if stripped.startswith(("- ", "* ")):
+            _close_table()
+            if not in_ul:
+                out.append(
+                    "<ul style=\"margin:0.3em 0; padding-left:1.2em;\">"
+                )
+                in_ul = True
+            out.append(f"<li>{stripped[2:]}</li>")
+            continue
+        # Non-list, non-table line
+        _close_ul()
+        _close_table()
+        if line:
+            out.append(line)
+        else:
+            out.append("<br>")
+
+    _close_ul()
+    _close_table()
+    # Join with <br> between content lines. Skip only when adjacent to
+    # true block-level tags (ul/table) — inline tags like <strong>,
+    # <em>, <code>, <a> should still get line breaks between them.
+    _block_prefixes = ("<ul", "</ul", "<table", "</table", "<tr", "</tr")
+
+    def _is_block(piece: str) -> bool:
+        return piece.startswith(_block_prefixes)
+
+    html_parts: List[str] = []
+    for i, piece in enumerate(out):
+        html_parts.append(piece)
+        next_piece = out[i + 1] if i + 1 < len(out) else ""
+        if (
+            piece
+            and not _is_block(piece)
+            and next_piece
+            and not _is_block(next_piece)
+            and piece != "<br>"
+            and next_piece != "<br>"
+        ):
+            html_parts.append("<br>")
+    # Collapse runs of 2+ <br> into a single <br> to avoid double spacing
+    # when the LLM emits blank lines between bullets/paragraphs.
+    html = "".join(html_parts)
+    html = _re_md.sub(r"(?:<br>\s*){2,}", "<br>", html)
+    return html
+
+
 def _fmt_ts(ts: Optional[str]) -> str:
     if not ts:
         return "—"
@@ -193,13 +325,16 @@ def _fmt_ts(ts: Optional[str]) -> str:
         return ts
 
 
-def _parse_json_list(raw: Optional[str]) -> List[str]:
+def _parse_json_list(raw) -> List[str]:
     if not raw:
         return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
     try:
-        return json.loads(raw)
+        out = json.loads(raw)
+        return out if isinstance(out, list) else [str(out)]
     except (json.JSONDecodeError, TypeError):
-        return [raw]
+        return [str(raw)]
 
 
 def _pill(text: str, bg: str, fg: str = "#fff") -> str:
@@ -233,6 +368,32 @@ def _priority_badge(priority: str) -> str:
     }
     bg, fg = colors.get(priority.lower(), ("#1c2128", "#8b949e"))
     return _pill(priority.upper(), bg, fg)
+
+
+def _relative_time(ts_str: str) -> str:
+    """Convert an ISO 8601 UTC (or epoch) timestamp to a human-readable relative time."""
+    if not ts_str:
+        return ""
+    ts: float
+    try:
+        ts = float(ts_str)
+    except (ValueError, TypeError):
+        try:
+            s = ts_str.replace("Z", "+00:00")
+            ts = datetime.fromisoformat(s).timestamp()
+        except (ValueError, TypeError):
+            return ""
+    delta = time.time() - ts
+    if delta < 60:
+        return "just now"
+    elif delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    elif delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    elif delta < 604800:
+        return f"{int(delta // 86400)}d ago"
+    else:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
 def _ioc_type_badge(ioc_type: str) -> str:
@@ -358,6 +519,12 @@ if run_pipeline:
         if resp and resp.get("task_id"):
             st.session_state["pipeline_task_id"] = resp["task_id"]
             st.session_state["pipeline_result"] = None
+            # Remember params so "Regenerate" can re-run the same job.
+            st.session_state["last_pipeline_params"] = {
+                "url": pipeline_url.strip(),
+                "rule_format": pipeline_fmt,
+                "llm_provider": pipeline_llm,
+            }
             st.rerun()
 
 # ── Pipeline Polling (fragment — sidebar stays stable) ────────────────────────
@@ -375,6 +542,11 @@ def _poll_pipeline():
         st.session_state["pipeline_result"] = task.get("result", {})
         st.session_state["pipeline_task_id"] = None
         st.rerun()
+    elif task["status"] == "pending_review" or task.get("review_status") == "pending_review":
+        # Hand off to the review panel
+        st.session_state["review_task_id"] = task_id
+        st.session_state["pipeline_task_id"] = None
+        st.rerun()
     elif task["status"] == "error":
         st.error(f"Pipeline failed: {task.get('error', 'unknown error')}")
         st.session_state["pipeline_task_id"] = None
@@ -386,6 +558,7 @@ def _poll_pipeline():
             "Phase 1 coverage analysis…",
             "Generating SPL rules…",
             "Generating Sigma rules…",
+            "Validating rules…",
             "Complete",
         ]
         idx = _STEPS.index(step) if step in _STEPS else 0
@@ -397,7 +570,185 @@ def _poll_pipeline():
 
 _poll_pipeline()
 
+# ── Review Panel ─────────────────────────────────────────────────────────────
+
+review_task_id = st.session_state.get("review_task_id")
+if review_task_id and not st.session_state.get("pipeline_result"):
+    review_data = _get(f"/tasks/{review_task_id}/review")
+    if review_data and review_data.get("rules"):
+        st.markdown(
+            '<div class="section-header">Review Generated Rules</div>',
+            unsafe_allow_html=True,
+        )
+        st.info(
+            f"**{len(review_data['rules'])} rule(s)** are awaiting your review. "
+            "Inspect each rule, optionally edit, then approve or reject."
+        )
+
+        # Show validation summary
+        verdicts = [r.get("verdict", "pass") for r in review_data["rules"]]
+        pass_count = verdicts.count("pass")
+        review_count = verdicts.count("needs_review")
+        fail_count = verdicts.count("fail")
+        v_cols = st.columns(3)
+        v_cols[0].metric("Passed", pass_count)
+        v_cols[1].metric("Needs Review", review_count)
+        v_cols[2].metric("Failed", fail_count)
+
+        # Show each rule for review — all checked by default; uncheck to exclude.
+        rule_edits: Dict[str, str] = {}
+        included_names: List[str] = []
+        for i, rule in enumerate(review_data["rules"]):
+            verdict = rule.get("verdict", "pass")
+            issues = rule.get("issues", [])
+            badge_colors = {
+                "pass": ("#0f2d18", "#3fb950"),
+                "needs_review": ("#2d1b00", "#ffa657"),
+                "fail": ("#4a1010", "#ff7b7b"),
+            }
+            bg, fg = badge_colors.get(verdict, ("#21262d", "#8b949e"))
+            verdict_badge = _pill(verdict.upper(), bg, fg)
+
+            include_col, expander_col = st.columns([0.5, 11])
+            with include_col:
+                include = st.checkbox(
+                    "Include",
+                    value=True,
+                    key=f"review_include_{i}",
+                    label_visibility="collapsed",
+                )
+            if include:
+                included_names.append(rule["name"])
+            with expander_col:
+                with st.expander(
+                    f"[{rule.get('format', 'sigma').upper()}] {rule['name']} — {verdict}",
+                    expanded=(verdict != "pass"),
+                ):
+                    st.markdown(
+                        f"{verdict_badge} **{rule['name']}**",
+                        unsafe_allow_html=True,
+                    )
+                    if issues:
+                        for issue in issues:
+                            st.warning(issue)
+
+                    ttps = rule.get("mitre_ttps", [])
+                    if ttps:
+                        st.markdown(
+                            " ".join(_ttp_badge(t) for t in ttps[:6]),
+                            unsafe_allow_html=True,
+                        )
+
+                    edited = st.text_area(
+                        "Rule content",
+                        value=rule.get("rule_content", ""),
+                        height=240,
+                        key=f"review_edit_{i}",
+                        label_visibility="collapsed",
+                    )
+                    if edited != rule.get("rule_content", ""):
+                        rule_edits[rule["name"]] = edited
+
+        # Review action buttons
+        st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
+        feedback = st.text_area(
+            "What should be improved? (optional)",
+            placeholder=(
+                "e.g. tighten the filter for admin tools, add temporal "
+                "windowing on the logon failures, drop the atomic IOC rule…"
+            ),
+            key="review_feedback",
+            height=80,
+            help=(
+                "On Regenerate, this is sent to the LLM to steer the new "
+                "rules. On Create PR, it is saved to the audit trail."
+            ),
+        )
+
+        st.caption(
+            f"{len(included_names)} of {len(review_data['rules'])} rule(s) selected for PR."
+        )
+        btn_cols = st.columns([1.2, 1.2, 4])
+        with btn_cols[0]:
+            create_pr_disabled = len(included_names) == 0
+            if st.button(
+                "Create PR",
+                type="primary",
+                key="btn_create_pr",
+                use_container_width=True,
+                disabled=create_pr_disabled,
+            ):
+                payload: Dict[str, Any] = {
+                    "decision": "approved",
+                    "included_rule_names": included_names,
+                }
+                if feedback:
+                    payload["feedback"] = feedback
+                if rule_edits:
+                    payload["rule_edits"] = rule_edits
+                resp = _post(f"/tasks/{review_task_id}/review", payload)
+                if resp:
+                    st.success(f"Approved {resp.get('rules_ingested', 0)} rules.")
+                    pr_url = resp.get("pr_url")
+                    pr_error = resp.get("pr_error")
+                    if pr_url:
+                        st.success(f"Draft PR created: [{pr_url}]({pr_url})")
+                        st.session_state["last_pr_url"] = pr_url
+                    else:
+                        # Always surface *something* — no silent failures.
+                        st.error(
+                            "PR not created: "
+                            + (pr_error or "unknown reason (check API logs)")
+                        )
+                    # Fetch the final result
+                    task = _get(f"/tasks/{review_task_id}")
+                    if task and task.get("result"):
+                        st.session_state["pipeline_result"] = task["result"]
+                    st.session_state["review_task_id"] = None
+                    st.rerun()
+
+        with btn_cols[1]:
+            last_params = st.session_state.get("last_pipeline_params")
+            if st.button(
+                "Regenerate",
+                key="btn_regenerate",
+                use_container_width=True,
+                disabled=not last_params,
+                help="Discard these rules and re-run the pipeline on the same URL.",
+            ):
+                # First, clear the pending-review task server-side.
+                payload = {"decision": "rejected"}
+                if feedback:
+                    payload["feedback"] = feedback
+                _post(f"/tasks/{review_task_id}/review", payload)
+                # Then kick off a fresh pipeline run with the original
+                # params, steered by the engineer's improvement guidance.
+                if last_params:
+                    regen_params = dict(last_params)
+                    if feedback:
+                        regen_params["improvement_guidance"] = feedback
+                    new_resp = _post("/analyze", regen_params)
+                    if new_resp and new_resp.get("task_id"):
+                        st.session_state["pipeline_task_id"] = new_resp["task_id"]
+                        st.session_state["pipeline_result"] = None
+                st.session_state["review_task_id"] = None
+                st.rerun()
+
+
 # ── Main Content ──────────────────────────────────────────────────────────────
+
+# Persistent PR link banner — shows across all views until dismissed, so
+# users always see the draft PR link after clicking Create PR, regardless
+# of which view the post-click rerun lands on.
+_pr_url_banner = st.session_state.get("last_pr_url")
+if _pr_url_banner:
+    banner_cols = st.columns([10, 1])
+    with banner_cols[0]:
+        st.success(f"Draft PR opened: [{_pr_url_banner}]({_pr_url_banner})")
+    with banner_cols[1]:
+        if st.button("✕", key="btn_dismiss_pr_banner", help="Dismiss"):
+            st.session_state.pop("last_pr_url", None)
+            st.rerun()
 
 pipeline_result = st.session_state.get("pipeline_result")
 
@@ -427,6 +778,20 @@ if pipeline_result and not pipeline_result.get("error"):
         )
 
         # ── Extracted IOCs (directly visible) ─────────────────────────────────
+        # Fetch enriched IOC data from Redis (has first_seen timestamps)
+        _actor = pipeline_result.get("threat_actor") or ""
+        _enriched_iocs: Dict[str, Dict] = {}
+        if _actor:
+            try:
+                _ioc_resp = requests.get(
+                    f"{API_URL}/iocs", params={"actor": _actor, "limit": 200}, timeout=5
+                )
+                if _ioc_resp.ok:
+                    for rec in _ioc_resp.json():
+                        _enriched_iocs[rec.get("value", "")] = rec
+            except Exception:
+                pass
+
         st.markdown(
             '<div class="section-header">Extracted IOCs</div>',
             unsafe_allow_html=True,
@@ -435,22 +800,30 @@ if pipeline_result and not pipeline_result.get("error"):
             st.caption("No IOCs extracted from this report.")
         else:
             active_types = [k for k, v in iocs_data.items() if v]
-            ioc_cols = st.columns(min(len(active_types), 5))
+            ioc_cols = st.columns(min(len(active_types), 3))
             for col_idx, ioc_type in enumerate(active_types):
                 values = iocs_data[ioc_type]
                 with ioc_cols[col_idx % len(ioc_cols)]:
                     st.markdown(
                         f"{_ioc_type_badge(ioc_type)} "
-                        f'<span style="color:#8b949e; font-size:0.75rem;">x{len(values)}</span>',
+                        f'<span style="color:#8b949e; font-size:0.85rem;">x{len(values)}</span>',
                         unsafe_allow_html=True,
                     )
                     for v in values[:10]:
+                        enriched = _enriched_iocs.get(v, {})
+                        ts = enriched.get("first_seen", "")
+                        ts_label = _relative_time(ts) if ts else "just now"
                         st.markdown(
-                            f'<code style="font-size:0.72rem; color:#c9d1d9;">{v}</code>',
+                            f'<div style="display:flex; align-items:baseline; gap:0.5rem;">'
+                            f'<code style="font-size:0.85rem; color:#c9d1d9; '
+                            f'word-break:break-all;">{v}</code>'
+                            f'<span style="font-size:0.7rem; color:#484f58; '
+                            f'white-space:nowrap;">{ts_label}</span></div>',
                             unsafe_allow_html=True,
                         )
                     if len(values) > 10:
                         st.caption(f"+ {len(values) - 10} more")
+            st.caption("IOCs expire after 90 days")
 
         # ── Coverage Gaps (directly visible) ──────────────────────────────────
         gap_label = f"Coverage Gaps — {len(exact_gaps)} exact"
@@ -530,6 +903,7 @@ if pipeline_result and not pipeline_result.get("error"):
         st.markdown("<div style='height:1rem;'></div>", unsafe_allow_html=True)
         if st.button("✕ Clear Results", key="btn_clear"):
             st.session_state["pipeline_result"] = None
+            st.session_state.pop("last_pr_url", None)
             st.rerun()
 
 elif pipeline_result and pipeline_result.get("error"):
@@ -547,15 +921,51 @@ else:
     actors = _load_actors()
     coverage = _load_coverage()
 
-    total_iocs = sum(e.get("ioc_count", 0) for e in coverage)
-    total_rules = sum(e.get("rule_count", 0) for e in coverage)
-    no_rules = sum(1 for e in coverage if not e.get("has_rules"))
+    # Aggregate counts from the API /stats endpoint.
+    _stats: Dict[str, int] = {}
+    try:
+        _stats_resp = requests.get(f"{API_URL}/stats", timeout=5)
+        _stats_resp.raise_for_status()
+        _stats = _stats_resp.json() or {}
+    except Exception:
+        pass
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Actors Tracked", len(actors))
-    c2.metric("IOCs in Store", total_iocs)
-    c3.metric("Detection Rules", total_rules)
-    c4.metric("Coverage Gaps", no_rules)
+    total_iocs = int(_stats.get("iocs") or 0) or sum(
+        e.get("ioc_count", 0) for e in coverage
+    )
+    rules_sigma = int(_stats.get("rules_sigma") or 0)
+    rules_ai = int(_stats.get("rules_ai_generated") or 0)
+
+    # Still need merged_actors for the Actors Tracked delta.
+    merged_actors: set = set()
+    try:
+        _rules_resp = requests.get(
+            f"{API_URL}/rules", params={"limit": 1000}, timeout=5
+        )
+        _rules_resp.raise_for_status()
+        for r in _rules_resp.json() or []:
+            if (r.get("source_url") or "").startswith("github:"):
+                _a = (r.get("threat_actor") or "").strip()
+                if _a:
+                    merged_actors.add(_a.lower())
+    except Exception:
+        pass
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Actors Tracked",
+        len(actors),
+        delta=f"+{len(merged_actors)} merged" if merged_actors else None,
+    )
+    c2.metric(
+        "IOCs Tracked",
+        total_iocs,
+    )
+    c3.metric(
+        "Detection Rules",
+        rules_sigma,
+        delta=f"{rules_ai} AI-generated" if rules_ai else None,
+    )
 
     st.markdown("<div style='height:1.2rem;'></div>", unsafe_allow_html=True)
 
@@ -570,12 +980,12 @@ else:
 
     # Example query chips (clickable buttons)
     _EXAMPLES = [
-        "List all threat actors",
-        "Top 5 TTPs",
-        "Show coverage gaps",
-        "IOCs for T1059",
-        "Rules for UNC6395",
-        "Which TTPs have no rules?",
+        "Top 10 TTPs covered",
+        "Show coverage matrix",
+        "Recently created rules",
+        "Newly added reports",
+        "Which actors are tracked?",
+        "Most critical TTP gaps",
     ]
 
     # CSS to style chip buttons
@@ -662,7 +1072,7 @@ div[data-testid="stHorizontalBlock"].chip-row button p {
         st.markdown(
             f'<div style="background:#161b22; border:1px solid #21262d; border-radius:2px 14px 14px 14px; '
             f'padding:14px 18px; margin:0.2rem 0 0.1rem; font-size:0.85rem; color:#c9d1d9; '
-            f'line-height:1.6;">{entry["answer"]}</div>',
+            f'line-height:1.6;">{_md_to_html(entry["answer"])}</div>',
             unsafe_allow_html=True,
         )
         if entry.get("tool"):

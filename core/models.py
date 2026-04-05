@@ -55,6 +55,7 @@ class DetectionRule(BaseModel):
     mitre_ttps: List[str]
     rule_content: str
     format: Literal["sigma", "spl"]
+    source_file: str = ""  # relative path in repo (baseline rules)
 
 
 class RuleOutput(BaseModel):
@@ -72,6 +73,14 @@ class RulesBundle(BaseModel):
     rules: List[RuleOutput]
 
 
+class RuleValidationResult(BaseModel):
+    """A detection rule paired with its automated validation verdict."""
+
+    rule: DetectionRule
+    verdict: Literal["pass", "fail", "needs_review"]
+    issues: List[str] = []
+
+
 class AgentState(TypedDict):
     """State for the LangGraph workflow"""
 
@@ -82,4 +91,11 @@ class AgentState(TypedDict):
     coverage_gaps: List[CoverageGap]
     rule_format: Literal["sigma", "spl"]
     error: Optional[str]
+    errors: List[str]
     _store_rules_cache: List[dict]
+    # Review workflow fields
+    validated_rules: List[dict]
+    review_status: Optional[Literal["pending_review", "approved", "rejected"]]
+    review_feedback: Optional[str]
+    # Freeform guidance from the detection engineer to steer (re)generation
+    improvement_guidance: Optional[str]

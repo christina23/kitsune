@@ -5,11 +5,11 @@ Provides:
   - IOCCollection  – typed Pydantic model replacing Dict[str, List[str]]
   - parse_iocs_from_text  – regex-based extraction from raw text
   - validate_and_enrich_iocs – merges LLM-extracted IOCs with regex findings
-                               and deduplicates/normalises each field
+                               and deduplicates/normalizes each field
 """
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List
 from pydantic import BaseModel
 
 # ── Regex patterns ───────────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ def _urls_to_domains(urls: List[str]) -> List[str]:
 def parse_iocs_from_text(text: str) -> IOCCollection:
     """
     Extract IOCs from raw text using regex patterns.
-    Returns an IOCCollection with deduplicated, normalised values.
+    Returns an IOCCollection with deduplicated, normalized values.
     """
     raw_ips = [ip for ip in _RE_IP.findall(text) if _is_public_ip(ip)]
     raw_urls = _RE_URL.findall(text)
