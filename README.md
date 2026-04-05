@@ -9,7 +9,11 @@ Quick like a fox and full of wisdom, Kitsune is an AI agent that automatically g
 - **Validated IOC/TTP Extraction**: Regex + LLM extraction with confidence scoring, deduplication, and MITRE ATT&CK validation
 - **Coverage Gap Analysis**: Compares extracted techniques against generated rules and reports undetected TTPs with priority and recommended data sources
 - **Baseline Sigma Corpus**: Loads a local directory or private GitHub repo of sigma rules at startup; every analyze job checks new rules against the full corpus via TLSH fuzzy matching before ingesting
-- **GitHub PR Integration**: Propose accepted novel rules to a upstream sigma repo as a pull request; sync merged PRs back into the store automatically
+- **Human-in-the-loop Review**: Per-rule checkboxes to include/exclude before PR creation; "What should be improved?" prompt steers regeneration while enforcing Sigma/SPL format constraints
+- **GitHub PR Integration**: Propose accepted rules to an upstream sigma repo as a single-commit draft PR with `kitsune-generated` label; branches follow `feature/added-{N}-rules-for-{theme}` naming; sync merged PRs back into the store automatically
+- **MITRE Actor Enrichment**: Every generated rule gets one `attack.g####` tag per actor from the MITRE CTI STIX bundle (Redis-cached, 7d TTL), falling back to `actor.<slug>` only when no group mapping exists; multi-actor strings (`"UNC6353, UNC6691"`) yield one tag per actor
+- **Coverage Heatmap**: Per-tactic coverage rollup + prioritized critical-gap list (sorted by IOC volume), with a one-click MITRE ATT&CK Navigator layer export (v4.5 JSON, descending-score sort) for visual coverage analysis
+- **AI Search (AMA)**: Natural-language `/ask` endpoint that routes to the right store query and renders concise tables/bullets/links inline in the Streamlit chat
 - **Redis Store**: Optional persistent IOC and detection rule store with actor/TTP indexing and trend analytics
 - **Search UI**: Streamlit app for querying across IOCs, rules, actors, trends, and coverage gaps
 - **REST API**: FastAPI backend with Scalar and Swagger interactive docs
@@ -194,6 +198,10 @@ pip install PyGithub
 | `POST /baseline/reload` | Hot-reload the corpus from disk/GitHub without restarting |
 | `POST /rules/propose-pr` | Open a PR to the upstream repo with specified rule IDs |
 | `GET /github/sync` | Pull merged kitsune PRs, ingest rules into Redis, reload baseline |
+| `GET /stats` | Aggregate counts: IOCs tracked, actors tracked, sigma rules, AI-generated rules |
+| `GET /coverage/by-tactic` | Per-MITRE-tactic coverage rollup with uncovered-with-IOCs lists |
+| `GET /coverage/navigator` | MITRE ATT&CK Navigator v4.5 layer JSON (auto-loadable via `#layerURL=`) |
+| `POST /ask` | Natural-language search — AI picks the right tool, returns table/bullet answer |
 
 ## Extending
 
