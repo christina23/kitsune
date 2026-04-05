@@ -686,24 +686,25 @@ if review_task_id and not st.session_state.get("pipeline_result"):
                     payload["feedback"] = feedback
                 if rule_edits:
                     payload["rule_edits"] = rule_edits
-                resp = _post(f"/tasks/{review_task_id}/review", payload)
+                with st.spinner("Opening draft PR…"):
+                    resp = _post(f"/tasks/{review_task_id}/review", payload)
+                    if resp:
+                        pr_url = resp.get("pr_url")
+                        if pr_url:
+                            st.session_state["last_pr_url"] = pr_url
+                        # Fetch the final result so the report section
+                        # renders on the post-rerun page.
+                        task = _get(f"/tasks/{review_task_id}")
+                        if task and task.get("result"):
+                            st.session_state["pipeline_result"] = task["result"]
                 if resp:
-                    st.success(f"Approved {resp.get('rules_ingested', 0)} rules.")
-                    pr_url = resp.get("pr_url")
                     pr_error = resp.get("pr_error")
-                    if pr_url:
-                        st.success(f"Draft PR created: [{pr_url}]({pr_url})")
-                        st.session_state["last_pr_url"] = pr_url
-                    else:
+                    if not resp.get("pr_url"):
                         # Always surface *something* — no silent failures.
                         st.error(
                             "PR not created: "
                             + (pr_error or "unknown reason (check API logs)")
                         )
-                    # Fetch the final result
-                    task = _get(f"/tasks/{review_task_id}")
-                    if task and task.get("result"):
-                        st.session_state["pipeline_result"] = task["result"]
                     st.session_state["review_task_id"] = None
                     st.rerun()
 
