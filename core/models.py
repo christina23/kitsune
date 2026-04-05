@@ -97,3 +97,5 @@ class AgentState(TypedDict):
     validated_rules: List[dict]
     review_status: Optional[Literal["pending_review", "approved", "rejected"]]
     review_feedback: Optional[str]
+    # Freeform guidance from the detection engineer to steer (re)generation
+    improvement_guidance: Optional[str]

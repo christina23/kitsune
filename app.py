@@ -518,10 +518,18 @@ if review_task_id and not st.session_state.get("pipeline_result"):
 
         # Review action buttons
         st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
-        feedback = st.text_input(
-            "Feedback (optional)",
-            placeholder="Add notes for the audit trail…",
+        feedback = st.text_area(
+            "What should be improved? (optional)",
+            placeholder=(
+                "e.g. tighten the filter for admin tools, add temporal "
+                "windowing on the logon failures, drop the atomic IOC rule…"
+            ),
             key="review_feedback",
+            height=80,
+            help=(
+                "On Regenerate, this is sent to the LLM to steer the new "
+                "rules. On Create PR, it is saved to the audit trail."
+            ),
         )
 
         st.caption(
@@ -580,9 +588,13 @@ if review_task_id and not st.session_state.get("pipeline_result"):
                 if feedback:
                     payload["feedback"] = feedback
                 _post(f"/tasks/{review_task_id}/review", payload)
-                # Then kick off a fresh pipeline run with the original params.
+                # Then kick off a fresh pipeline run with the original
+                # params, steered by the engineer's improvement guidance.
                 if last_params:
-                    new_resp = _post("/analyze", last_params)
+                    regen_params = dict(last_params)
+                    if feedback:
+                        regen_params["improvement_guidance"] = feedback
+                    new_resp = _post("/analyze", regen_params)
                     if new_resp and new_resp.get("task_id"):
                         st.session_state["pipeline_task_id"] = new_resp["task_id"]
                         st.session_state["pipeline_result"] = None

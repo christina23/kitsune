@@ -477,6 +477,7 @@ class AnalyzeRequest(BaseModel):
     url: str
     rule_format: Literal["sigma", "spl"] = "spl"
     llm_provider: str = "anthropic"
+    improvement_guidance: Optional[str] = None
 
 
 class IOCSummary(BaseModel):
@@ -592,7 +593,11 @@ def _run_pipeline_task(task_id: str, req: "AnalyzeRequest", store=None) -> None:
         agent.app = agent.workflow.compile(checkpointer=MemorySaver())
 
         _set_task(task_id, step="Pipeline running…")
-        rules = agent.generate_detections(req.url, req.rule_format)
+        rules = agent.generate_detections(
+            req.url,
+            req.rule_format,
+            improvement_guidance=req.improvement_guidance,
+        )
 
         state = agent._last_state or {}
         intel = state.get("threat_intel")

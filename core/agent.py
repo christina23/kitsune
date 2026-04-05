@@ -454,9 +454,17 @@ class ThreatDetectionAgent:
         return state
 
     def generate_detections(
-        self, url: str, rule_format: Literal["sigma", "spl"] = "spl"
+        self,
+        url: str,
+        rule_format: Literal["sigma", "spl"] = "spl",
+        improvement_guidance: Optional[str] = None,
     ) -> List[DetectionRule]:
-        """Main public method to generate detection rules from a URL"""
+        """Main public method to generate detection rules from a URL.
+
+        `improvement_guidance` is freeform text from the detection engineer
+        (e.g. from a Regenerate prompt) that is injected into the rule-
+        generation prompt and bypasses the IOC-dedup cache.
+        """
         initial_state: AgentState = {
             "url": url,
             "content": "",
@@ -470,6 +478,7 @@ class ThreatDetectionAgent:
             "validated_rules": [],
             "review_status": None,
             "review_feedback": None,
+            "improvement_guidance": (improvement_guidance or "").strip() or None,
         }
         config = {
             "configurable": {
@@ -580,14 +589,22 @@ class ThreatDetectionAgent:
         intel = state["threat_intel"]
         author = determine_author(state["url"], intel.threat_actor)
         config = _RULE_GENERATOR_CONFIG[rule_format]
+        guidance = (state.get("improvement_guidance") or "").strip()
 
-        # IOC dedup check: skip generation if rules for this IOC set already exist
+        # IOC dedup check: skip generation if rules for this IOC set already
+        # exist. Bypassed when the user supplied improvement guidance (they
+        # explicitly want fresh rules steered by their feedback).
         ioc_hash = (
             _compute_ioc_hash(intel.iocs)
             if intel.iocs and not intel.iocs.is_empty()
             else ""
         )
-        if ioc_hash and self.store and self.store.rules_exist_for_ioc_hash(ioc_hash):
+        if (
+            ioc_hash
+            and not guidance
+            and self.store
+            and self.store.rules_exist_for_ioc_hash(ioc_hash)
+        ):
             existing = self.store.get_rules_by_ioc_hash(ioc_hash)
             matching = [
                 r for r in existing
@@ -629,6 +646,23 @@ class ThreatDetectionAgent:
                 else ""
             ),
         )
+
+        if guidance:
+            prompt_content += (
+                "\n\n---\nDETECTION ENGINEER GUIDANCE (must incorporate):\n"
+                f"{guidance}\n"
+                "Revise the rules you would otherwise produce to address "
+                "this guidance — change selection logic, filters, "
+                "thresholds, severity, naming, FP exclusions, etc. "
+                "HARD CONSTRAINTS (never override, even if guidance asks): "
+                f"output format MUST remain {rule_format.upper()}; the "
+                "JSON response schema above is non-negotiable; Sigma rules "
+                "must still include title/logsource/detection and a "
+                "filter_* block with falsepositives:; SPL rules must "
+                "still compile as valid Splunk SPL. If the guidance "
+                "conflicts with these constraints, keep the constraints "
+                "and apply the guidance only to the parts that remain."
+            )
 
         prompt = ChatPromptTemplate.from_messages(
             [
