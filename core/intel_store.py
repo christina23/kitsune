@@ -7,6 +7,7 @@ Use create_store() to get a configured store or None.
 
 import hashlib
 import json
+import re
 import time
 import warnings
 from abc import ABC, abstractmethod
@@ -18,6 +19,20 @@ from .models import DetectionRule, ThreatIntelligence
 def _slug(name: str) -> str:
     """Lowercase slug for use in Redis key names."""
     return name.lower().replace(" ", "_")
+
+
+# LLM extraction sometimes returns multiple actors as a single string
+# (e.g. "UNC6353, UNC6691" or "APT29 / Cozy Bear"). Split these into
+# individual actor names so each is indexed separately.
+_ACTOR_SPLIT_RE = re.compile(r"\s*(?:,|/|&|\band\b)\s*", re.IGNORECASE)
+
+
+def _split_actor_names(raw: Optional[str]) -> List[str]:
+    """Split a possibly-combined actor string into individual names."""
+    if not raw:
+        return []
+    parts = _ACTOR_SPLIT_RE.split(raw)
+    return [p.strip() for p in parts if p.strip()]
 
 
 def _sha(value: str, length: int = 16) -> str:
@@ -270,9 +285,7 @@ class RedisIntelStore(ThreatIntelStore):
     def ingest_threat_intel(
         self, threat_intel: ThreatIntelligence, source_url: str
     ) -> None:
-        actors = (
-            [threat_intel.threat_actor] if threat_intel.threat_actor else []
-        )
+        actors = _split_actor_names(threat_intel.threat_actor)
         campaigns = (
             [threat_intel.campaign_name] if threat_intel.campaign_name else []
         )
@@ -571,6 +584,76 @@ class RedisIntelStore(ThreatIntelStore):
         if keys:
             self._r.delete(*keys)
         return len(keys)
+
+    def normalize_combined_actors(self) -> Dict[str, Any]:
+        """Split any combined-name actor entries into individual actors.
+
+        Finds actor-set members whose names contain a separator (comma,
+        slash, ampersand, or the word "and"), splits them into constituent
+        names, merges each combined actor's IOC and rule indexes into the
+        individual actors' indexes, rewrites the ``threat_actors`` JSON
+        field on every referenced IOC/rule, and removes the combined names.
+
+        Returns a summary dict: ``{"removed": [...], "added": [...]}``.
+        """
+        all_actors = list(self._r.smembers(self._actors_key()))
+        combined = [a for a in all_actors if _ACTOR_SPLIT_RE.search(a)]
+        if not combined:
+            return {"removed": [], "added": []}
+
+        added_set: set = set()
+        for combined_name in combined:
+            parts = _split_actor_names(combined_name)
+            if not parts:
+                continue
+
+            # Merge the combined actor's IOC/rule index keys into each
+            # individual actor's indexes, then delete the combined indexes.
+            combined_ioc_idx = self._actor_ioc_idx(combined_name)
+            combined_rule_idx = self._actor_rule_idx(combined_name)
+            ioc_keys = self._r.smembers(combined_ioc_idx)
+            rule_keys = self._r.smembers(combined_rule_idx)
+
+            pipe = self._r.pipeline()
+            for name in parts:
+                if ioc_keys:
+                    pipe.sadd(self._actor_ioc_idx(name), *ioc_keys)
+                if rule_keys:
+                    pipe.sadd(self._actor_rule_idx(name), *rule_keys)
+                pipe.sadd(self._actors_key(), name)
+                added_set.add(name)
+            pipe.delete(combined_ioc_idx, combined_rule_idx)
+            pipe.srem(self._actors_key(), combined_name)
+            pipe.execute()
+
+            # Rewrite the threat_actors JSON field on each referenced IOC
+            for ioc_key in ioc_keys:
+                raw = self._r.hget(ioc_key, "threat_actors")
+                if not raw:
+                    continue
+                current = json.loads(raw)
+                updated = []
+                for a in current:
+                    if a == combined_name:
+                        updated.extend(parts)
+                    else:
+                        updated.append(a)
+                # Dedupe while preserving order
+                updated = list(dict.fromkeys(updated))
+                self._r.hset(ioc_key, "threat_actors", json.dumps(updated))
+
+            # Rewrite the threat_actor field on each referenced rule
+            for rule_key in rule_keys:
+                current = self._r.hget(rule_key, "threat_actor")
+                if current == combined_name:
+                    # Rules only store a single actor string today; keep
+                    # the first split name so the existing schema is happy.
+                    self._r.hset(rule_key, "threat_actor", parts[0])
+
+        return {
+            "removed": sorted(combined),
+            "added": sorted(added_set),
+        }
 
     def get_actor_summary(self, actor_name: str) -> Dict:
         ioc_keys = self._r.smembers(self._actor_ioc_idx(actor_name))

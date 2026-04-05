@@ -1287,6 +1287,73 @@ _ASK_SYSTEM = (
     "For queries about newly added reports or threat actors, use list_actors."
 )
 
+_ASK_SUMMARY_SYSTEM = (
+    "You are a threat intelligence analyst summarizing query results. "
+    "Be concise and direct. "
+    "Formatting rules — you MUST follow these: "
+    "(1) For simple lists of strings (actors, TTP IDs, gaps, tags), "
+    "render as a markdown bullet list with one item per line "
+    "(e.g. `- UNC6748\\n- UNC6353`). Never comma-separate list items "
+    "on a single line. "
+    "(2) For structured data with multiple fields per row (rules, "
+    "IOCs, trending TTPs), use a markdown table. "
+    "(3) For detection rules tables: show columns Created "
+    "(created_at as-is), Name (use the name field verbatim — it "
+    "is already a markdown link when available), TTPs, and "
+    "Report (use the report field verbatim — already a markdown "
+    "link, or empty). Do NOT add any other columns. "
+    "(4) For coverage data (get_coverage): NEVER render the full "
+    "per-TTP list as a table. Output EXACTLY two blocks and "
+    "nothing else — no intro, no closing commentary, no repeated "
+    "lists, no technique descriptions: "
+    "(a) a single summary line of totals (e.g. `**142 techniques "
+    "tracked** — 98 ✅ with rules, 27 ⚠️ IOCs only, 17 ❌ "
+    "uncovered`), then "
+    "(b) a bullet list (max 10 items) of gaps where "
+    "`has_iocs=true` and `has_rules=false`, formatted as "
+    "`- ⚠️ T#### ({ioc_count} IOCs, no rules)`, one per line "
+    "with NO blank lines between bullets. If there are zero "
+    "gaps, omit block (b) entirely. Do NOT restate the gaps in "
+    "prose afterwards. "
+    "(5) For coverage matrix data (get_coverage_matrix): output "
+    "EXACTLY these blocks and nothing else — no intro paragraph, "
+    "no closing commentary, no repeated descriptions: "
+    "(a) one summary line of totals from `totals` "
+    "(e.g. `**{total_tracked} techniques tracked** — "
+    "{with_rules} ✅ with rules, {iocs_only} ⚠️ IOCs only, "
+    "{uncovered} ❌ uncovered`). "
+    "(b) a markdown table titled `**Coverage by tactic**` with "
+    "columns `Tactic | Covered | Gaps` where Covered shows "
+    "`{covered}/{total} ({pct}%)` and Gaps shows `gap_count` "
+    "(render as `—` when 0). Use rows from `by_tactic` in the "
+    "order given. Format the tactic name in Title Case "
+    "(e.g. `Credential Access`). "
+    "(c) a section `**Most critical gaps**` followed by a bullet "
+    "list from `critical_gaps` (up to 10 items), formatted as "
+    "`- ⚠️ **T####** — {tactic_title_case} ({ioc_count} IOCs, "
+    "no rules)`. One per line, no blank lines between. Skip this "
+    "block entirely if `critical_gaps` is empty. "
+    "(d) one final line: "
+    "`🗺️ [Open full heatmap in MITRE ATT&CK Navigator]"
+    "({navigator_url})`. "
+    "(6) If the data is empty, say so clearly."
+)
+
+
+def _ask_tools_openai_format() -> list:
+    """Translate _ASK_TOOLS (Anthropic schema) to OpenAI function-calling schema."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        }
+        for t in _ASK_TOOLS
+    ]
+
 
 def _execute_ask_tool(
     store, tool_name: str, tool_input: dict, navigator_url: str = ""
@@ -1465,6 +1532,101 @@ class GitHubSyncResponse(BaseModel):
     pr_urls: List[str]
 
 
+def _run_ask_anthropic(query: str, store, nav_url: str) -> "AskResponse":
+    """Execute the /ask flow against Anthropic's tool-use API."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    # Step 1: LLM picks the right tool + params
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=512,
+        system=_ASK_SYSTEM,
+        tools=_ASK_TOOLS,
+        messages=[{"role": "user", "content": query}],
+    )
+
+    tool_block = next((b for b in response.content if b.type == "tool_use"), None)
+    if not tool_block:
+        return AskResponse(answer="I couldn't determine which data to look up. Try asking about TTPs, actors, IOCs, or detection rules.")
+
+    # Step 2: Execute the tool against the store
+    data = _execute_ask_tool(store, tool_block.name, tool_block.input, nav_url)
+
+    # Step 3: Send tool result back to LLM for a natural language summary
+    summary_response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=_ASK_SUMMARY_SYSTEM,
+        tools=_ASK_TOOLS,
+        messages=[
+            {"role": "user", "content": query},
+            {"role": "assistant", "content": response.content},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_block.id, "content": json.dumps(data, default=str)}]},
+        ],
+    )
+    answer = "".join(b.text for b in summary_response.content if b.type == "text")
+    return AskResponse(answer=answer, tool_used=tool_block.name, data=data)
+
+
+def _run_ask_openai(query: str, store, nav_url: str) -> "AskResponse":
+    """Fallback /ask flow using OpenAI function calling."""
+    import openai
+
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    oai_tools = _ask_tools_openai_format()
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    # Step 1: tool selection
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=512,
+        messages=[
+            {"role": "system", "content": _ASK_SYSTEM},
+            {"role": "user", "content": query},
+        ],
+        tools=oai_tools,
+        tool_choice="required",
+    )
+    msg = response.choices[0].message
+    if not msg.tool_calls:
+        return AskResponse(answer="I couldn't determine which data to look up. Try asking about TTPs, actors, IOCs, or detection rules.")
+
+    tc = msg.tool_calls[0]
+    try:
+        tool_input = json.loads(tc.function.arguments or "{}")
+    except json.JSONDecodeError:
+        tool_input = {}
+
+    # Step 2: execute tool
+    data = _execute_ask_tool(store, tc.function.name, tool_input, nav_url)
+
+    # Step 3: summary
+    summary_response = client.chat.completions.create(
+        model=model,
+        max_tokens=4096,
+        messages=[
+            {"role": "system", "content": _ASK_SUMMARY_SYSTEM},
+            {"role": "user", "content": query},
+            {
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(data, default=str)},
+        ],
+    )
+    answer = summary_response.choices[0].message.content or ""
+    return AskResponse(answer=answer, tool_used=tc.function.name, data=data)
+
+
 @app.post("/ask", response_model=AskResponse, tags=["Search"])
 def ask_query(req: AskRequest, request: Request):
     """
@@ -1478,100 +1640,41 @@ def ask_query(req: AskRequest, request: Request):
     - `"show me IOCs for apt28"`
     - `"what detection rules exist for T1059?"`
     - `"which TTPs have no detection rules?"`
-    """
-    import anthropic
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not set — AI search unavailable.")
+    Prefers Anthropic; falls back to OpenAI on auth/billing errors or when
+    `ANTHROPIC_API_KEY` is unset.
+    """
+    anth_key = os.getenv("ANTHROPIC_API_KEY")
+    oai_key = os.getenv("OPENAI_API_KEY")
+    if not anth_key and not oai_key:
+        raise HTTPException(status_code=503, detail="Neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set — AI search unavailable.")
 
     store = get_store()
-    client = anthropic.Anthropic(api_key=api_key)
-
-    # Step 1: LLM picks the right tool + params
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=512,
-        system=_ASK_SYSTEM,
-        tools=_ASK_TOOLS,
-        messages=[{"role": "user", "content": req.query}],
-    )
-
-    # Find the tool_use block
-    tool_block = next((b for b in response.content if b.type == "tool_use"), None)
-    if not tool_block:
-        return AskResponse(answer="I couldn't determine which data to look up. Try asking about TTPs, actors, IOCs, or detection rules.")
-
-    # Step 2: Execute the tool against the store
     nav_url = _navigator_view_url(request)
-    data = _execute_ask_tool(store, tool_block.name, tool_block.input, nav_url)
 
-    # Step 3: Send tool result back to LLM for a natural language summary
-    summary_response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
-        system=(
-            "You are a threat intelligence analyst summarizing query results. "
-            "Be concise and direct. "
-            "Formatting rules — you MUST follow these: "
-            "(1) For simple lists of strings (actors, TTP IDs, gaps, tags), "
-            "render as a markdown bullet list with one item per line "
-            "(e.g. `- UNC6748\\n- UNC6353`). Never comma-separate list items "
-            "on a single line. "
-            "(2) For structured data with multiple fields per row (rules, "
-            "IOCs, trending TTPs), use a markdown table. "
-            "(3) For detection rules tables: show columns Created "
-            "(created_at as-is), Name (use the name field verbatim — it "
-            "is already a markdown link when available), TTPs, and "
-            "Report (use the report field verbatim — already a markdown "
-            "link, or empty). Do NOT add any other columns. "
-            "(4) For coverage data (get_coverage): NEVER render the full "
-            "per-TTP list as a table. Output EXACTLY two blocks and "
-            "nothing else — no intro, no closing commentary, no repeated "
-            "lists, no technique descriptions: "
-            "(a) a single summary line of totals (e.g. `**142 techniques "
-            "tracked** — 98 ✅ with rules, 27 ⚠️ IOCs only, 17 ❌ "
-            "uncovered`), then "
-            "(b) a bullet list (max 10 items) of gaps where "
-            "`has_iocs=true` and `has_rules=false`, formatted as "
-            "`- ⚠️ T#### ({ioc_count} IOCs, no rules)`, one per line "
-            "with NO blank lines between bullets. If there are zero "
-            "gaps, omit block (b) entirely. Do NOT restate the gaps in "
-            "prose afterwards. "
-            "(5) For coverage matrix data (get_coverage_matrix): output "
-            "EXACTLY these blocks and nothing else — no intro paragraph, "
-            "no closing commentary, no repeated descriptions: "
-            "(a) one summary line of totals from `totals` "
-            "(e.g. `**{total_tracked} techniques tracked** — "
-            "{with_rules} ✅ with rules, {iocs_only} ⚠️ IOCs only, "
-            "{uncovered} ❌ uncovered`). "
-            "(b) a markdown table titled `**Coverage by tactic**` with "
-            "columns `Tactic | Covered | Gaps` where Covered shows "
-            "`{covered}/{total} ({pct}%)` and Gaps shows `gap_count` "
-            "(render as `—` when 0). Use rows from `by_tactic` in the "
-            "order given. Format the tactic name in Title Case "
-            "(e.g. `Credential Access`). "
-            "(c) a section `**Most critical gaps**` followed by a bullet "
-            "list from `critical_gaps` (up to 10 items), formatted as "
-            "`- ⚠️ **T####** — {tactic_title_case} ({ioc_count} IOCs, "
-            "no rules)`. One per line, no blank lines between. Skip this "
-            "block entirely if `critical_gaps` is empty. "
-            "(d) one final line: "
-            "`🗺️ [Open full heatmap in MITRE ATT&CK Navigator]"
-            "({navigator_url})`. "
-            "(6) If the data is empty, say so clearly."
-        ),
-        tools=_ASK_TOOLS,
-        messages=[
-            {"role": "user", "content": req.query},
-            {"role": "assistant", "content": response.content},
-            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_block.id, "content": json.dumps(data, default=str)}]},
-        ],
-    )
+    if anth_key:
+        try:
+            import anthropic
+            return _run_ask_anthropic(req.query, store, nav_url)
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.BadRequestError) as e:
+            # Common: "credit balance is too low" comes back as BadRequestError
+            msg = str(e).lower()
+            if "credit" in msg or "balance" in msg or "authentication" in msg or "api key" in msg:
+                print(f"[/ask] Anthropic unavailable ({e}); falling back to OpenAI.")
+                if not oai_key:
+                    raise HTTPException(status_code=503, detail=f"Anthropic unavailable and no OPENAI_API_KEY fallback: {e}")
+            else:
+                raise  # genuine request error — don't mask it
+        except anthropic.RateLimitError as e:
+            print(f"[/ask] Anthropic rate-limited; falling back to OpenAI. {e}")
+            if not oai_key:
+                raise HTTPException(status_code=503, detail="Anthropic rate-limited and no OPENAI_API_KEY fallback.")
 
-    answer = "".join(b.text for b in summary_response.content if b.type == "text")
-
-    return AskResponse(answer=answer, tool_used=tool_block.name, data=data)
+    # OpenAI path (fallback or primary)
+    try:
+        return _run_ask_openai(req.query, store, nav_url)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"AI search failed: {e}")
 
 
 @app.put("/rules/{rule_id:path}", tags=["Detection Rules"])
