@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 from datetime import date, datetime
 from functools import lru_cache
 from typing import Dict, List, Optional
@@ -232,7 +233,13 @@ class GitHubPRClient:
             base=self._base_branch,
             draft=True,
         )
-        self._ensure_label_applied(pr, KITSUNE_PR_LABEL)
+        # Label application is fire-and-forget: it costs 1-2 extra round
+        # trips and is not needed for the user to see the PR URL.
+        threading.Thread(
+            target=self._ensure_label_applied,
+            args=(pr, KITSUNE_PR_LABEL),
+            daemon=True,
+        ).start()
         log.info("Draft PR created: %s", pr.html_url)
         return pr.html_url
 
@@ -313,15 +320,33 @@ class GitHubPRClient:
         return rules
 
 
+_client_cache: Dict[tuple, GitHubPRClient] = {}
+_client_cache_lock = threading.Lock()
+
+
 def get_github_client() -> Optional[GitHubPRClient]:
-    """Return a configured GitHubPRClient, or None if integration is not set up."""
+    """Return a configured GitHubPRClient, or None if integration is not set up.
+
+    The client (and its underlying repo handle) is cached per
+    (token, repo, branch) tuple so that repeated approvals don't
+    re-pay the ``get_repo`` round trip.
+    """
     if not GitHubConfig.is_enabled():
         log.warning(
             "GitHub integration disabled: set GITHUB_TOKEN and GITHUB_REPO to enable."
         )
         return None
+    key = (
+        GitHubConfig.GITHUB_TOKEN,
+        GitHubConfig.GITHUB_REPO,
+        GitHubConfig.GITHUB_BRANCH,
+    )
+    with _client_cache_lock:
+        cached = _client_cache.get(key)
+        if cached is not None:
+            return cached
     try:
-        return GitHubPRClient(
+        client = GitHubPRClient(
             token=GitHubConfig.GITHUB_TOKEN,
             repo_slug=GitHubConfig.GITHUB_REPO,
             base_branch=GitHubConfig.GITHUB_BRANCH,
@@ -329,3 +354,6 @@ def get_github_client() -> Optional[GitHubPRClient]:
     except ImportError as exc:
         log.warning("GitHub integration unavailable: %s", exc)
         return None
+    with _client_cache_lock:
+        _client_cache[key] = client
+    return client

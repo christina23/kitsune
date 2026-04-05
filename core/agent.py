@@ -196,6 +196,21 @@ def _filter_baseline_duplicates(
 
 # ── Rule format config ─────────────────────────────────────────────────────
 
+# Quality-check pattern tuples — module-level constants (all pre-lowercased)
+_QC_IOC_PATTERNS = (
+    "src_ip=", "dest_ip=", "ip=", "hash=", "md5=",
+    "sha256=", "domain=", "sourceip:", "destinationip:",
+)
+_QC_BEHAVIORAL_KEYWORDS = (
+    "stats ", "count", "| rare", "| outlier", "timeframe:",
+    "| bucket", "| streamstats", "group-by", "near", "temporal",
+    "| where", "condition:", "aggregate",
+)
+_QC_TIME_KEYWORDS = (
+    "span=", "earliest=", "latest=", "bucket _time", "streamstats window=",
+)
+
+
 _RULE_GENERATOR_CONFIG = {
     "sigma": {
         "prompt_template": SIGMA_GENERATION_PROMPT,
@@ -328,7 +343,7 @@ class ThreatDetectionAgent:
                 return chain.invoke(input_data)
             except Exception as e:
                 if attempt == max_retries - 1:
-                    raise e
+                    raise
                 print(
                     f"Attempt {attempt + 1} failed"
                     f" for {self.llm_provider}: {str(e)}"
@@ -799,9 +814,12 @@ class ThreatDetectionAgent:
         state["validated_rules"] = validated
 
         # Summary
-        pass_count = sum(1 for v in validated if v["verdict"] == "pass")
-        review_count = sum(1 for v in validated if v["verdict"] == "needs_review")
-        fail_count = sum(1 for v in validated if v["verdict"] == "fail")
+        counts = {"pass": 0, "needs_review": 0, "fail": 0}
+        for v in validated:
+            counts[v["verdict"]] = counts.get(v["verdict"], 0) + 1
+        pass_count = counts["pass"]
+        review_count = counts["needs_review"]
+        fail_count = counts["fail"]
         print(
             f"[VALIDATE] {len(validated)} rules: "
             f"{pass_count} passed, {review_count} needs review, {fail_count} failed"
@@ -825,14 +843,8 @@ class ThreatDetectionAgent:
 
         # 1. Atomic-only detection: flag rules that match only on static
         #    IOC values (IPs, hashes, domains) without behavioral context
-        _ioc_patterns = ("src_ip=", "dest_ip=", "ip=", "hash=", "md5=",
-                         "sha256=", "domain=", "SourceIp:", "DestinationIp:")
-        _behavioral_keywords = ("stats ", "count", "| rare", "| outlier",
-                                "timeframe:", "| bucket", "| streamstats",
-                                "group-by", "near", "temporal", "| where",
-                                "condition:", "aggregate")
-        has_ioc_match = any(p.lower() in content_lower for p in _ioc_patterns)
-        has_behavioral = any(k.lower() in content_lower for k in _behavioral_keywords)
+        has_ioc_match = any(p in content_lower for p in _QC_IOC_PATTERNS)
+        has_behavioral = any(k in content_lower for k in _QC_BEHAVIORAL_KEYWORDS)
         if has_ioc_match and not has_behavioral:
             issues.append(
                 "Quality: rule matches only on atomic IOCs without behavioral "
@@ -866,9 +878,7 @@ class ThreatDetectionAgent:
                     "scoping (user, host, src_ip) for actionable alerts"
                 )
             # Check for time windowing
-            time_keywords = ("span=", "earliest=", "latest=", "bucket _time",
-                             "streamstats window=")
-            if not any(k in content_lower for k in time_keywords):
+            if not any(k in content_lower for k in _QC_TIME_KEYWORDS):
                 issues.append(
                     "Quality: no temporal windowing — consider adding span= "
                     "or bucket to detect bursts within a time window"
@@ -894,16 +904,24 @@ class ThreatDetectionAgent:
         """Phase 1 coverage: compare extracted techniques vs store rules with TLSH."""
         techniques = getattr(state.get("threat_intel"), "techniques", []) or []
 
-        # Query store for existing rules covering each technique
+        # Query store for existing rules covering each technique.
+        # Prefer the batched helper (single pipelined round-trip) when
+        # available; fall back to per-TTP queries for stores that don't
+        # implement it.
         store_rules: List[Dict] = []
         if self.store:
-            seen_keys: set = set()
-            for tech in techniques:
-                for r in self.store.query_rules(ttp=tech.id, limit=20):
-                    key = r.get("rule_id", r.get("name", ""))
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        store_rules.append(r)
+            ttp_ids = [t.id for t in techniques]
+            batched = getattr(self.store, "query_rules_for_ttps", None)
+            if callable(batched) and ttp_ids:
+                store_rules = batched(ttp_ids, limit_per_ttp=20)
+            else:
+                seen_keys: set = set()
+                for tech in techniques:
+                    for r in self.store.query_rules(ttp=tech.id, limit=20):
+                        key = r.get("rule_id", r.get("name", ""))
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            store_rules.append(r)
 
         # Prepend baseline corpus so Phase 1 checks it even when Redis is empty
         baseline_dicts = get_baseline_repo().rules_as_store_dicts()
