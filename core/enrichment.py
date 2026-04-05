@@ -25,21 +25,29 @@ def enrich_rule(rule: DetectionRule, store: ThreatIntelStore) -> Dict:
     }
     associated_campaigns: List[str] = []
 
+    # O(1) membership tracking (preserves insertion order in output lists)
+    seen_actors: set = set()
+    seen_campaigns: set = set()
+    seen_iocs: Dict[str, set] = {k: set() for k in related_iocs}
+
     for ttp_id in rule.mitre_ttps:
         iocs = store.query_iocs(ttp=ttp_id)
         for ioc in iocs:
             ioc_type = ioc.get("type")
             value = ioc.get("value")
             if ioc_type and value and ioc_type in related_iocs:
-                if value not in related_iocs[ioc_type]:
+                if value not in seen_iocs[ioc_type]:
+                    seen_iocs[ioc_type].add(value)
                     related_iocs[ioc_type].append(value)
             actors = json.loads(ioc.get("threat_actors", "[]"))
             for a in actors:
-                if a not in related_actors:
+                if a not in seen_actors:
+                    seen_actors.add(a)
                     related_actors.append(a)
             camps = json.loads(ioc.get("campaigns", "[]"))
             for c in camps:
-                if c not in associated_campaigns:
+                if c not in seen_campaigns:
+                    seen_campaigns.add(c)
                     associated_campaigns.append(c)
 
     return {
@@ -74,6 +82,11 @@ def enrich_detection_event(
     related_iocs: List[str] = []
     matched_in_store = 0
 
+    seen_actors: set = set()
+    seen_campaigns: set = set()
+    seen_related: set = set()
+    matched_set: set = set(matched_iocs)
+
     # Reverse-lookup each matched IOC
     for value in matched_iocs:
         ioc_key = store._r.get(store._lookup_key(value))
@@ -84,10 +97,12 @@ def enrich_detection_event(
         if not data:
             continue
         for a in json.loads(data.get("threat_actors", "[]")):
-            if a not in actor_attribution:
+            if a not in seen_actors:
+                seen_actors.add(a)
                 actor_attribution.append(a)
         for c in json.loads(data.get("campaigns", "[]")):
-            if c not in campaign_context:
+            if c not in seen_campaigns:
+                seen_campaigns.add(c)
                 campaign_context.append(c)
 
     # TTP-based additional context
@@ -95,7 +110,8 @@ def enrich_detection_event(
         iocs = store.query_iocs(ttp=ttp_id)
         for ioc in iocs:
             v = ioc.get("value")
-            if v and v not in related_iocs and v not in matched_iocs:
+            if v and v not in seen_related and v not in matched_set:
+                seen_related.add(v)
                 related_iocs.append(v)
         ttp_context.append({"ttp_id": ttp_id, "related_ioc_count": len(iocs)})
 

@@ -15,13 +15,19 @@ from .models import DetectionRule, CoverageGap
 # Maximum TLSH distance to consider two content blobs "similar"
 TLSH_THRESHOLD = 150
 
+# Resolve py-tlsh once at import time; leaves _tlsh=None if unavailable.
+try:
+    import tlsh as _tlsh  # py-tlsh
+except Exception:
+    _tlsh = None
+
 
 def _tlsh_hash(content: str) -> str:
     """Compute TLSH hash; returns empty string if py-tlsh unavailable or content too short."""
+    if _tlsh is None:
+        return ""
     try:
-        import tlsh  # py-tlsh
-
-        h = tlsh.hash(content.encode())
+        h = _tlsh.hash(content.encode())
         return h if h != "TNULL" else ""
     except Exception:
         return ""
@@ -29,12 +35,10 @@ def _tlsh_hash(content: str) -> str:
 
 def _tlsh_distance(h1: str, h2: str) -> Optional[int]:
     """Return TLSH distance between two hashes, or None if either is empty."""
-    if not h1 or not h2:
+    if not h1 or not h2 or _tlsh is None:
         return None
     try:
-        import tlsh
-
-        return tlsh.diff(h1, h2)
+        return _tlsh.diff(h1, h2)
     except Exception:
         return None
 
