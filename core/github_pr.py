@@ -168,7 +168,7 @@ class GitHubPRClient:
             path = _rule_filename(rule, threat_actor)
             self._repo.create_file(
                 path=path,
-                message=f"feat(rules): add {rule.name}",
+                message=f"Add {rule.name}",
                 content=rule.rule_content,
                 branch=branch_name,
             )

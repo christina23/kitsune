@@ -737,6 +737,19 @@ if review_task_id and not st.session_state.get("pipeline_result"):
 
 # ── Main Content ──────────────────────────────────────────────────────────────
 
+# Persistent PR link banner — shows across all views until dismissed, so
+# users always see the draft PR link after clicking Create PR, regardless
+# of which view the post-click rerun lands on.
+_pr_url_banner = st.session_state.get("last_pr_url")
+if _pr_url_banner:
+    banner_cols = st.columns([10, 1])
+    with banner_cols[0]:
+        st.success(f"Draft PR opened: [{_pr_url_banner}]({_pr_url_banner})")
+    with banner_cols[1]:
+        if st.button("✕", key="btn_dismiss_pr_banner", help="Dismiss"):
+            st.session_state.pop("last_pr_url", None)
+            st.rerun()
+
 pipeline_result = st.session_state.get("pipeline_result")
 
 if pipeline_result and not pipeline_result.get("error"):
@@ -763,11 +776,6 @@ if pipeline_result and not pipeline_result.get("error"):
             len(exact_gaps),
             delta=f"{len(fuzzy_gaps)} fuzzy" if fuzzy_gaps else None,
         )
-
-        # ── Draft PR link (if just created) ─────────────────────────────────
-        _pr_url = st.session_state.get("last_pr_url")
-        if _pr_url:
-            st.success(f"Draft PR opened: [{_pr_url}]({_pr_url})")
 
         # ── Extracted IOCs (directly visible) ─────────────────────────────────
         # Fetch enriched IOC data from Redis (has first_seen timestamps)
