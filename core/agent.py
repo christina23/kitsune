@@ -7,8 +7,7 @@ import json as _json
 import os
 import re as _re
 import time
-import uuid as _uuid
-from typing import TYPE_CHECKING, Dict, List, Optional, Literal
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Literal
 
 if TYPE_CHECKING:
     from .intel_store import ThreatIntelStore
@@ -19,7 +18,6 @@ from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 
 from .models import (
     ThreatIntelligence,
@@ -222,6 +220,18 @@ class ThreatDetectionAgent:
     from intelligence sources.
     """
 
+    # Mapping of LangGraph node names → user-facing progress labels,
+    # surfaced via the optional step_callback on generate_detections().
+    _NODE_PROGRESS_LABELS: Dict[str, str] = {
+        "fetch_content": "Fetching URL content…",
+        "extract_threat_intel": "Extracting IOCs & TTPs…",
+        "analyze_coverage": "Phase 1 coverage analysis…",
+        "generate_sigma_rules": "Generating Sigma rules…",
+        "generate_spl_rules": "Generating SPL rules…",
+        "validate_rules": "Validating rules…",
+        "await_review": "Awaiting review…",
+    }
+
     def __init__(
         self,
         llm_provider: Optional[str] = None,
@@ -252,7 +262,11 @@ class ThreatDetectionAgent:
             chunk_overlap=Settings.CHUNK_OVERLAP,
         )
         self.workflow = self._create_workflow()
-        self.app = self.workflow.compile(checkpointer=MemorySaver())
+        # No checkpointer: the pipeline runs end-to-end per invocation, and
+        # resume_after_review() operates on self._last_state — so per-step
+        # checkpoint serialization would be pure overhead that scales with
+        # state size (notably _store_rules_cache + detection_rules).
+        self.app = self.workflow.compile()
 
     def _get_valid_json_response(
         self, prompt, expected_keys=None, max_retries=3
@@ -492,12 +506,17 @@ class ThreatDetectionAgent:
         url: str,
         rule_format: Literal["sigma", "spl"] = "spl",
         improvement_guidance: Optional[str] = None,
+        step_callback: Optional[Callable[[str], None]] = None,
     ) -> List[DetectionRule]:
         """Main public method to generate detection rules from a URL.
 
         `improvement_guidance` is freeform text from the detection engineer
         (e.g. from a Regenerate prompt) that is injected into the rule-
         generation prompt and bypasses the IOC-dedup cache.
+
+        `step_callback`, if given, is invoked with a user-facing label each
+        time a workflow node completes — used by the API to surface progress
+        without monkey-patching the agent's internal methods.
         """
         initial_state: AgentState = {
             "url": url,
@@ -514,14 +533,30 @@ class ThreatDetectionAgent:
             "review_feedback": None,
             "improvement_guidance": (improvement_guidance or "").strip() or None,
         }
-        config = {
-            "configurable": {
-                "thread_id": f"threat-detection-{_uuid.uuid4().hex[:12]}"
-            }
-        }
 
         try:
-            result = self.app.invoke(initial_state, config)
+            if step_callback is None:
+                result = self.app.invoke(initial_state)
+            else:
+                # Stream with both modes: "updates" tells us which node just
+                # ran (for progress labels), "values" gives us the full state
+                # after each superstep so we can capture the final result.
+                result: AgentState = initial_state  # type: ignore[assignment]
+                for mode, chunk in self.app.stream(
+                    initial_state, stream_mode=["updates", "values"]
+                ):
+                    if mode == "updates":
+                        for node_name in chunk:
+                            label = self._NODE_PROGRESS_LABELS.get(
+                                node_name, node_name
+                            )
+                            try:
+                                step_callback(label)
+                            except Exception as cb_err:
+                                print(f"[step_callback] {cb_err}")
+                    elif mode == "values":
+                        result = chunk
+
             self._last_state = result
             if result.get("error"):
                 print(f"Error: {result['error']}")
