@@ -52,6 +52,30 @@ def _safe_branch_component(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "-", value)[:40].strip("-")
 
 
+def _theme_slug(threat_actor: Optional[str], rules: List[DetectionRule]) -> str:
+    """Derive a 5-word-max kebab-case theme for the branch name.
+
+    Prefers the threat-actor name; falls back to salient words drawn
+    from rule names when no actor is known.
+    """
+    # Source words: actor name preferred, else distilled from rule names.
+    if threat_actor:
+        source = threat_actor
+    else:
+        source = " ".join(r.name for r in rules[:3])
+
+    # Tokenise: letters/digits only, drop noise words, kebab-join.
+    tokens = re.findall(r"[A-Za-z0-9]+", source.lower())
+    noise = {"the", "a", "an", "and", "or", "of", "for", "to", "in", "on",
+             "with", "via", "rule", "rules", "detection", "activity"}
+    meaningful = [t for t in tokens if t not in noise and len(t) > 1]
+    if not meaningful:
+        meaningful = tokens or ["kitsune"]
+    theme = "-".join(meaningful[:5])
+    # Cap length (branch refs have practical limits).
+    return theme[:60].strip("-") or "kitsune"
+
+
 def _rule_filename(rule: DetectionRule, actor: Optional[str] = None) -> str:
     """Produce a safe path for the rule inside the PR: rules/{actor}/{name}.yml"""
     actor_dir = _safe_branch_component(actor or "kitsune")
@@ -151,12 +175,15 @@ class GitHubPRClient:
 
         from github import InputGitTreeElement
 
-        today = date.today().strftime("%Y%m%d")
-        actor_slug = _safe_branch_component(threat_actor or "unknown")
+        # Branch naming: feature/added-{N}-rules-for-{theme}-{shorthash}
+        # The short hash keeps branches unique across same-day re-runs.
+        theme = _theme_slug(threat_actor, rules)
         content_hash = hashlib.sha256(
             "".join(r.name for r in rules).encode()
-        ).hexdigest()[:8]
-        branch_name = f"kitsune/rules/{actor_slug}-{today}-{content_hash}"
+        ).hexdigest()[:6]
+        branch_name = (
+            f"feature/added-{len(rules)}-rules-for-{theme}-{content_hash}"
+        )
 
         # Get base branch commit
         base_ref = self._repo.get_branch(self._base_branch)
