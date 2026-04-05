@@ -149,6 +149,8 @@ class GitHubPRClient:
                 "Set review_approved=True after the review step."
             )
 
+        from github import InputGitTreeElement
+
         today = date.today().strftime("%Y%m%d")
         actor_slug = _safe_branch_component(threat_actor or "unknown")
         content_hash = hashlib.sha256(
@@ -156,25 +158,43 @@ class GitHubPRClient:
         ).hexdigest()[:8]
         branch_name = f"kitsune/rules/{actor_slug}-{today}-{content_hash}"
 
-        # Get base branch SHA
+        # Get base branch commit
         base_ref = self._repo.get_branch(self._base_branch)
-        base_sha = base_ref.commit.sha
+        base_commit = self._repo.get_commit(base_ref.commit.sha)
+        base_tree = base_commit.commit.tree
 
-        # Create the branch
-        self._repo.create_git_ref(f"refs/heads/{branch_name}", base_sha)
+        # Create the branch at base
+        self._repo.create_git_ref(
+            f"refs/heads/{branch_name}", base_commit.sha
+        )
 
-        # Commit each rule file (conventional-commits style)
-        for rule in rules:
-            path = _rule_filename(rule, threat_actor)
-            self._repo.create_file(
-                path=path,
-                message=f"Add {rule.name}",
+        # Build one tree containing every rule file, then one commit.
+        tree_elements = [
+            InputGitTreeElement(
+                path=_rule_filename(rule, threat_actor),
+                mode="100644",
+                type="blob",
                 content=rule.rule_content,
-                branch=branch_name,
             )
+            for rule in rules
+        ]
+        new_tree = self._repo.create_git_tree(tree_elements, base_tree)
+
+        actor_label = threat_actor or "unknown actor"
+        commit_title = (
+            f"Add {len(rules)} detection rule"
+            f"{'s' if len(rules) != 1 else ''} for {actor_label}"
+        )
+        commit_body = "\n".join(f"- {r.name}" for r in rules)
+        new_commit = self._repo.create_git_commit(
+            message=f"{commit_title}\n\n{commit_body}",
+            tree=new_tree,
+            parents=[base_commit.commit],
+        )
+        # Move the branch ref to the new commit
+        self._repo.get_git_ref(f"heads/{branch_name}").edit(new_commit.sha)
 
         # Open as draft PR
-        actor_label = threat_actor or "unknown actor"
         pr = self._repo.create_pull(
             title=(
                 f"Detection rules for {actor_label} "
