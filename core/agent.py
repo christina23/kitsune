@@ -63,6 +63,14 @@ def _actor_slug(name: str) -> str:
     return _re.sub(r"[^a-z0-9]+", "", (name or "").lower())
 
 
+def _split_actors(raw: Optional[str]) -> List[str]:
+    """Split a multi-actor string (comma/slash/ampersand/\" and \")."""
+    if not raw:
+        return []
+    parts = _re.split(r"[,/&]|\s+and\s+|\s+\+\s+", raw)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
 def _enrich_sigma_yaml(
     rule_content: str,
     reference: str,
@@ -105,15 +113,19 @@ def _enrich_sigma_yaml(
         tags_lower.add("kitsune.generated")
 
     if threat_actor:
-        slug = _actor_slug(threat_actor)
-        has_group_tag = any(t.startswith("attack.g") for t in tags_lower)
-        has_actor_tag = any(t.startswith("actor.") for t in tags_lower)
-        if not has_group_tag and not has_actor_tag and slug:
+        # Multi-actor strings like "UNC6353, UNC6691" become two tags.
+        for actor_name in _split_actors(threat_actor):
+            slug = _actor_slug(actor_name)
+            if not slug:
+                continue
             group_id = _mitre_group_lookup(slug)
             if group_id:
-                tags.append(f"attack.{group_id.lower()}")
+                candidate = f"attack.{group_id.lower()}"
             else:
-                tags.append(f"actor.{slug}")
+                candidate = f"actor.{slug}"
+            if candidate.lower() not in tags_lower:
+                tags.append(candidate)
+                tags_lower.add(candidate.lower())
 
     doc["tags"] = tags
 
