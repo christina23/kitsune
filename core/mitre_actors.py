@@ -10,7 +10,9 @@ to the static dict in config.ActorGroupMapping on any failure.
 from __future__ import annotations
 
 import json
+import os
 import re
+import urllib.request
 import warnings
 from typing import Dict, Optional
 
@@ -60,8 +62,6 @@ def _parse_stix_bundle(bundle: dict) -> Dict[str, str]:
 def _fetch_from_mitre(timeout: int = 20) -> Optional[Dict[str, str]]:
     """Fetch + parse the MITRE STIX bundle. Returns None on failure."""
     try:
-        import urllib.request
-
         req = urllib.request.Request(
             MITRE_STIX_URL, headers={"User-Agent": "kitsune/1.0"}
         )
@@ -79,8 +79,6 @@ def _fetch_from_mitre(timeout: int = 20) -> Optional[Dict[str, str]]:
 
 
 def _redis_key() -> str:
-    import os
-
     prefix = os.getenv("REDIS_KEY_PREFIX", "kitsune")
     return f"{prefix}:{_REDIS_KEY_SUFFIX}"
 

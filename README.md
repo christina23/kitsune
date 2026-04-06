@@ -1,15 +1,31 @@
 # Kitsune [kitsu-nay] キツネ
 
-> LangGraph workflow for crafting detections against emerging tradecraft.
+> A LangGraph workflow for crafting detections against emerging tradecraft.
 
-Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques,
-checks them against a baseline sigma corpus, and generates new detection rules
-for whatever isn't already covered. Accepted rules can be opened as PRs against
-an upstream sigma repo.
+Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques, checks them against your baseline sigma corpus, and generates new detection rules for gaps in coverage. It runs as a fixed sequence of stages where the LLM handles the heavy lifting (intel extraction, rule generation) and routing is mostly deterministic, similar to a CI/CD pipeline for detections.
+
+```
+[Fetch report]  →  [Extract IOCs + TTPs]  →  [Gap analysis vs. baseline]
+                                                          ↓
+                                                   [Generate rules]
+                                                          ↓
+                                                   [Validate rules]
+                                                          ↓
+                                            [Pause: engineer review]
+                                                 ↙           ↘
+                                           [Approve]       [Reject]
+                                              ↓
+                                        [Open draft PR]
+                                              ↓
+                                          [PR merged]
+                                              ↓
+                                   [Sync + TLSH re-index baseline]
+```
+
+Kitsune skips near-duplicate rules before writing anything. It TLSH-matches each candidate against the full corpus so only genuinely novel coverage lands in your store. Supports Anthropic Claude and OpenAI GPT models; outputs Sigma or SPL.
 
 ## Table of Contents
 
-- [Background](#background)
 - [Install](#install)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -17,16 +33,6 @@ an upstream sigma repo.
 - [Extending](#extending)
 - [Maintainers](#maintainers)
 - [License](#license)
-
-## Background
-
-Most detection-engineering teams already maintain a sigma repo. Kitsune treats
-that repo as the source of truth: before generating anything, it TLSH-matches
-candidate rules against the full baseline corpus so you don't end up with
-near-duplicate rules cluttering the store. Only novel rules get ingested into
-Redis and proposed as PRs.
-
-Supports Anthropic Claude and OpenAI GPT models; outputs Sigma or SPL.
 
 ## Install
 
@@ -57,14 +63,6 @@ streamlit run app.py                   # terminal 2
 ```
 
 ## Usage
-
-### Generate rules from a report
-
-```bash
-INTEL_URL=https://example.com/threat-report python main.py
-```
-
-Rules are written to `output/<provider>/` and ingested into Redis.
 
 ### CLI modes
 
@@ -131,28 +129,14 @@ coverage heatmap with MITRE ATT&CK Navigator layer export.
 ### Baseline sigma corpus
 
 Point `SIGMA_REPO_PATH` at a local directory, or `SIGMA_REPO_URL` at a git
-repo (`pip install gitpython`). Remote repos are cloned to
-`~/.cache/kitsune/sigma_repo` and pulled on reload. Kitsune prefers a private
+repo (`pip install gitpython`). Kitsune clones remote repos to `~/.cache/kitsune/sigma_repo` and pulls on reload. Kitsune prefers a private
 repo when both are configured.
 
-Phase 1 coverage runs against the full corpus — new rules within TLSH
-distance < 150 of an existing rule are skipped, not re-ingested.
+Phase 1 coverage runs against the full corpus. Kitsune skips and does not re-ingest any new rule within TLSH distance < 150 of an existing one.
 
 ### GitHub PR integration
 
-```bash
-GITHUB_TOKEN=ghp_...
-GITHUB_REPO=owner/sigma-rules
-pip install PyGithub
-```
-
-Accepted rules are batched into one draft PR per analyze job, branch name
-`feature/added-{N}-rules-for-{theme}`, labeled `kitsune-generated`. Merged
-PRs sync back into Redis and reload the baseline.
-
-MITRE actor enrichment: each rule gets one `attack.g####` tag per actor
-(Redis-cached from the MITRE CTI STIX bundle, 7d TTL), falling back to
-`actor.<slug>` only when no group mapping exists.
+Set `GITHUB_TOKEN` and `GITHUB_REPO` in `.env` and `pip install PyGithub`. Kitsune batches accepted rules into one draft PR per analyze job, using branch name `feature/added-{N}-rules-for-{theme}` and label `kitsune-generated`. Once merged, it syncs the rules back into Redis and reloads the baseline.
 
 ## API
 
@@ -172,7 +156,7 @@ MITRE actor enrichment: each rule gets one `attack.g####` tag per actor
 **New LLM provider:** add it to `LLMProvider` in `core/models.py`, configure
 the model/key in `core/config.py`, and handle it in `core/llm_factory.py`.
 
-**Prompts:** extraction and generation templates live in `core/prompts.py`.
+**Prompts:** find extraction and generation templates in `core/prompts.py`.
 
 ## Maintainers
 
@@ -180,4 +164,4 @@ the model/key in `core/config.py`, and handle it in `core/llm_factory.py`.
 
 ## License
 
-No license file yet — all rights reserved until one is added.
+No license file yet. All rights reserved until one is added.
