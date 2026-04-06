@@ -1,11 +1,28 @@
 # Kitsune [kitsu-nay] キツネ
 
-> LangGraph workflow for crafting detections against emerging tradecraft.
+> A LangGraph workflow for crafting detections against emerging tradecraft.
 
-Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques,
-checks them against a baseline sigma corpus, and generates new detection rules
-for whatever isn't already covered. Accepted rules can be opened as PRs against
-an upstream sigma repo.
+Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques, checks them against your baseline sigma corpus, and generates new detection rules for gaps in coverage. Think of it like a CI/CD pipeline for detections — a fixed sequence of stages where the LLM handles the heavy lifting (intel extraction, rule generation) and routing is mostly deterministic.
+
+```
+[Fetch report]  →  [Extract IOCs + TTPs]  →  [Gap analysis vs. baseline]
+                                                          ↓
+                                                   [Generate rules]
+                                                          ↓
+                                                   [Validate rules]
+                                                          ↓
+                                            [Pause: engineer review]
+                                                 ↙           ↘
+                                           [Approve]       [Reject]
+                                              ↓
+                                        [Open draft PR]
+                                              ↓
+                                          [PR merged]
+                                              ↓
+                                   [Sync + TLSH re-index baseline]
+```
+
+Near-duplicate rules are skipped before anything gets written — candidates are TLSH-matched against the full corpus so only genuinely novel coverage lands in your store.
 
 ## Table of Contents
 
