@@ -26,8 +26,8 @@ def enrich_rule(rule: DetectionRule, store: ThreatIntelStore) -> Dict:
     associated_campaigns: List[str] = []
 
     # O(1) membership tracking (preserves insertion order in output lists)
-    seen_actors: set = set()
-    seen_campaigns: set = set()
+    seen_actors = set()
+    seen_campaigns = set()
     seen_iocs: Dict[str, set] = {k: set() for k in related_iocs}
 
     for ttp_id in rule.mitre_ttps:
@@ -82,10 +82,10 @@ def enrich_detection_event(
     related_iocs: List[str] = []
     matched_in_store = 0
 
-    seen_actors: set = set()
-    seen_campaigns: set = set()
-    seen_related: set = set()
-    matched_set: set = set(matched_iocs)
+    seen_actors = set()
+    seen_campaigns = set()
+    seen_related = set()
+    matched_set = set(matched_iocs)
 
     # Reverse-lookup each matched IOC
     for value in matched_iocs:

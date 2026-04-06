@@ -10,6 +10,7 @@ Requires the Kitsune API to be running at http://localhost:8000
 
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -129,6 +130,13 @@ hr { border-color: #21262d; }
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+def _http_detail(e: requests.exceptions.HTTPError) -> str:
+    try:
+        return e.response.json().get("detail", "")
+    except Exception:
+        return ""
+
+
 def _get(endpoint: str, params: Optional[Dict] = None) -> Any:
     try:
         resp = requests.get(f"{API_URL}{endpoint}", params=params, timeout=5)
@@ -138,12 +146,7 @@ def _get(endpoint: str, params: Optional[Dict] = None) -> Any:
         st.error(f"Cannot reach API at **{API_URL}**. Is `uvicorn api:app --port 8000` running?")
         return None
     except requests.exceptions.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.response.json().get("detail", "")
-        except Exception:
-            pass
-        st.error(f"API error {e.response.status_code}: {detail or str(e)}")
+        st.error(f"API error {e.response.status_code}: {_http_detail(e) or str(e)}")
         return None
 
 
@@ -156,12 +159,7 @@ def _post(endpoint: str, payload: Dict) -> Any:
         st.error(f"Cannot reach API at **{API_URL}**. Is `uvicorn api:app --port 8000` running?")
         return None
     except requests.exceptions.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.response.json().get("detail", "")
-        except Exception:
-            pass
-        st.error(f"API error {e.response.status_code}: {detail or str(e)}")
+        st.error(f"API error {e.response.status_code}: {_http_detail(e) or str(e)}")
         return None
 
 
@@ -174,12 +172,7 @@ def _put(endpoint: str, payload: Dict) -> Any:
         st.error(f"Cannot reach API at **{API_URL}**.")
         return None
     except requests.exceptions.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.response.json().get("detail", "")
-        except Exception:
-            pass
-        st.error(f"API error {e.response.status_code}: {detail or str(e)}")
+        st.error(f"API error {e.response.status_code}: {_http_detail(e) or str(e)}")
         return None
 
 
@@ -195,20 +188,19 @@ def _md_to_html(text: str) -> str:
         return ""
     # Convert markdown links [text](url) → <a href="url">text</a> first,
     # so they render inside table cells and plain text alike.
-    import re as _re_md
-    text = _re_md.sub(
+    text = re.sub(
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
         r'<a href="\2" target="_blank" style="color:#79c0ff;">\1</a>',
         text,
     )
     # Inline emphasis: **bold** and *italic* (bold first to avoid
     # greedy single-asterisk matches eating the double-asterisk pair).
-    text = _re_md.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", text)
-    text = _re_md.sub(
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(
         r"(?<![*\w])\*([^*\n]+)\*(?!\w)", r"<em>\1</em>", text
     )
     # Inline `code`
-    text = _re_md.sub(
+    text = re.sub(
         r"`([^`\n]+)`",
         r'<code style="background:#21262d; padding:1px 5px; '
         r'border-radius:4px; font-size:0.82em;">\1</code>',
@@ -312,7 +304,7 @@ def _md_to_html(text: str) -> str:
     # Collapse runs of 2+ <br> into a single <br> to avoid double spacing
     # when the LLM emits blank lines between bullets/paragraphs.
     html = "".join(html_parts)
-    html = _re_md.sub(r"(?:<br>\s*){2,}", "<br>", html)
+    html = re.sub(r"(?:<br>\s*){2,}", "<br>", html)
     return html
 
 
