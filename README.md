@@ -22,11 +22,10 @@ Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques, ch
                                    [Sync + TLSH re-index baseline]
 ```
 
-Near-duplicate rules are skipped before anything gets written — candidates are TLSH-matched against the full corpus so only genuinely novel coverage lands in your store.
+Near-duplicate rules are skipped before anything gets written — candidates are TLSH-matched against the full corpus so only genuinely novel coverage lands in your store. Supports Anthropic Claude and OpenAI GPT models; outputs Sigma or SPL.
 
 ## Table of Contents
 
-- [Background](#background)
 - [Install](#install)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -34,16 +33,6 @@ Near-duplicate rules are skipped before anything gets written — candidates are
 - [Extending](#extending)
 - [Maintainers](#maintainers)
 - [License](#license)
-
-## Background
-
-Most detection-engineering teams already maintain a sigma repo. Kitsune treats
-that repo as the source of truth: before generating anything, it TLSH-matches
-candidate rules against the full baseline corpus so you don't end up with
-near-duplicate rules cluttering the store. Only novel rules get ingested into
-Redis and proposed as PRs.
-
-Supports Anthropic Claude and OpenAI GPT models; outputs Sigma or SPL.
 
 ## Install
 
@@ -74,14 +63,6 @@ streamlit run app.py                   # terminal 2
 ```
 
 ## Usage
-
-### Generate rules from a report
-
-```bash
-INTEL_URL=https://example.com/threat-report python main.py
-```
-
-Rules are written to `output/<provider>/` and ingested into Redis.
 
 ### CLI modes
 
@@ -157,19 +138,7 @@ distance < 150 of an existing rule are skipped, not re-ingested.
 
 ### GitHub PR integration
 
-```bash
-GITHUB_TOKEN=ghp_...
-GITHUB_REPO=owner/sigma-rules
-pip install PyGithub
-```
-
-Accepted rules are batched into one draft PR per analyze job, branch name
-`feature/added-{N}-rules-for-{theme}`, labeled `kitsune-generated`. Merged
-PRs sync back into Redis and reload the baseline.
-
-MITRE actor enrichment: each rule gets one `attack.g####` tag per actor
-(Redis-cached from the MITRE CTI STIX bundle, 7d TTL), falling back to
-`actor.<slug>` only when no group mapping exists.
+Set `GITHUB_TOKEN` and `GITHUB_REPO` in `.env` and `pip install PyGithub`. Accepted rules are batched into one draft PR per analyze job, branch name `feature/added-{N}-rules-for-{theme}`, labeled `kitsune-generated`. Merged PRs sync back into Redis and reload the baseline.
 
 ## API
 
