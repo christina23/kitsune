@@ -2,7 +2,7 @@
 
 > A LangGraph workflow for crafting detections against emerging tradecraft.
 
-Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques, checks them against your baseline sigma corpus, and generates new detection rules for gaps in coverage. Think of it like a CI/CD pipeline for detections — a fixed sequence of stages where the LLM handles the heavy lifting (intel extraction, rule generation) and routing is mostly deterministic.
+Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques, checks them against your baseline sigma corpus, and generates new detection rules for gaps in coverage. It runs as a fixed sequence of stages where the LLM handles the heavy lifting (intel extraction, rule generation) and routing is mostly deterministic, similar to a CI/CD pipeline for detections.
 
 ```
 [Fetch report]  →  [Extract IOCs + TTPs]  →  [Gap analysis vs. baseline]
@@ -22,7 +22,7 @@ Kitsune reads a threat report URL, extracts IOCs and MITRE ATT&CK techniques, ch
                                    [Sync + TLSH re-index baseline]
 ```
 
-Near-duplicate rules are skipped before anything gets written — candidates are TLSH-matched against the full corpus so only genuinely novel coverage lands in your store. Supports Anthropic Claude and OpenAI GPT models; outputs Sigma or SPL.
+Kitsune skips near-duplicate rules before writing anything. It TLSH-matches each candidate against the full corpus so only genuinely novel coverage lands in your store. Supports Anthropic Claude and OpenAI GPT models; outputs Sigma or SPL.
 
 ## Table of Contents
 
@@ -129,16 +129,14 @@ coverage heatmap with MITRE ATT&CK Navigator layer export.
 ### Baseline sigma corpus
 
 Point `SIGMA_REPO_PATH` at a local directory, or `SIGMA_REPO_URL` at a git
-repo (`pip install gitpython`). Remote repos are cloned to
-`~/.cache/kitsune/sigma_repo` and pulled on reload. Kitsune prefers a private
+repo (`pip install gitpython`). Kitsune clones remote repos to `~/.cache/kitsune/sigma_repo` and pulls on reload. Kitsune prefers a private
 repo when both are configured.
 
-Phase 1 coverage runs against the full corpus — new rules within TLSH
-distance < 150 of an existing rule are skipped, not re-ingested.
+Phase 1 coverage runs against the full corpus. Kitsune skips and does not re-ingest any new rule within TLSH distance < 150 of an existing one.
 
 ### GitHub PR integration
 
-Set `GITHUB_TOKEN` and `GITHUB_REPO` in `.env` and `pip install PyGithub`. Accepted rules are batched into one draft PR per analyze job, branch name `feature/added-{N}-rules-for-{theme}`, labeled `kitsune-generated`. Merged PRs sync back into Redis and reload the baseline.
+Set `GITHUB_TOKEN` and `GITHUB_REPO` in `.env` and `pip install PyGithub`. Kitsune batches accepted rules into one draft PR per analyze job, using branch name `feature/added-{N}-rules-for-{theme}` and label `kitsune-generated`. Once merged, it syncs the rules back into Redis and reloads the baseline.
 
 ## API
 
@@ -158,7 +156,7 @@ Set `GITHUB_TOKEN` and `GITHUB_REPO` in `.env` and `pip install PyGithub`. Accep
 **New LLM provider:** add it to `LLMProvider` in `core/models.py`, configure
 the model/key in `core/config.py`, and handle it in `core/llm_factory.py`.
 
-**Prompts:** extraction and generation templates live in `core/prompts.py`.
+**Prompts:** find extraction and generation templates in `core/prompts.py`.
 
 ## Maintainers
 
@@ -166,4 +164,4 @@ the model/key in `core/config.py`, and handle it in `core/llm_factory.py`.
 
 ## License
 
-No license file yet — all rights reserved until one is added.
+No license file yet. All rights reserved until one is added.
